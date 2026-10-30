@@ -1,8 +1,8 @@
-# LAN Audio Bridge 0.1.1
+# LAN Audio Bridge 0.1.2
 
 在 TrueNAS SCALE（Linux amd64）上部署 AirPlay、通用 DLNA renderer 和 Spotify Connect 接收器，共用一只 USB 声卡输出。每个协议使用独立接收进程，PulseAudio 独占指定 ALSA 设备；协调器只允许一个音源通往硬件。新开始播放的音源接管输出，旧接收进程会断开并重启，因此旧手机不保证显示“暂停”。这不是无缝切歌或多房间同步产品。
 
-此前版本已通过容器内音频隔离、真实 DLNA 和 RAOP/AirPlay 1 软件验证，详见保留原版本信息的[验证记录](docs/local-validation-2026-10-29.md)。0.1.1 的宿主 Avahi 复用、代理隔离和故障恢复已通过隔离 Docker 测试，见[本轮验证记录](docs/verification-0.1.1.md)。AirPlay 2 手机传音、Spotify 账号播放、QQ 音乐/网易云兼容性及 USB 光纤实际出声仍待实机验收。
+此前版本已通过容器内音频隔离、真实 DLNA 和 RAOP/AirPlay 1 软件验证，详见保留原版本信息的[验证记录](docs/local-validation-2026-10-29.md)。0.1.1 的宿主 Avahi 复用、代理隔离和故障恢复已通过隔离 Docker 测试，见[0.1.1 验证记录](docs/verification-0.1.1.md)。AirPlay 2 手机传音、Spotify 账号播放、QQ 音乐/网易云兼容性及 USB 光纤实际出声仍待实机验收。
 
 ```text
 iPhone / DLNA 控制端 / Spotify Premium
@@ -45,12 +45,12 @@ USB 转光纤设备必须被 Linux 识别成 USB Audio Class（UAC）声卡，�
 
 ## 构建与 CLI 部署
 
-以下命令在 Linux 项目目录执行。构建镜像需要下载上游依赖，镜像名为本地 `lan-audio-bridge:0.1.1`，没有假定存在的公共镜像仓库。
+以下命令在 Linux 项目目录执行。构建镜像需要下载上游依赖，镜像名为本地 `lan-audio-bridge:0.1.2`，没有假定存在的公共镜像仓库。
 
 ```sh
 git clone https://github.com/zxsama/lan-audio-bridge.git
 cd lan-audio-bridge
-docker build --tag lan-audio-bridge:0.1.1 .
+docker build --tag lan-audio-bridge:0.1.2 .
 cp .env.example .env
 ```
 
@@ -80,7 +80,7 @@ docker compose logs --tail=100 audio
 
 仓库发布源码与部署文件，不包含预构建镜像或本地 `dist/` 归档。请先按上节构建镜像，再部署或导出。
 
-先确保 NAS 本地 Docker 中已有镜像。如果在另一台 Linux amd64 机器构建，可执行 `docker save -o lan-audio-bridge-0.1.1.tar lan-audio-bridge:0.1.1`，自行传输到 NAS，再执行 `docker load -i lan-audio-bridge-0.1.1.tar`。本项目不远程操作 NAS。
+先确保 NAS 本地 Docker 中已有镜像。如果在另一台 Linux amd64 机器构建，可执行 `docker save -o lan-audio-bridge-0.1.2.tar lan-audio-bridge:0.1.2`，自行传输到 NAS，再执行 `docker load -i lan-audio-bridge-0.1.2.tar`。项目脚本不会自动远程操作 NAS。
 
 填写 `.env` 后在 NAS 项目目录运行：
 
@@ -97,6 +97,8 @@ docker compose -f compose.yaml -f compose.host-avahi.yaml config > compose.rende
 核对渲染后的声卡、主机目录和服务名，再把该文件内容粘贴到 Apps → Discover → Install via YAML。GUI 不一定读取项目旁的 `.env`，因此粘贴已展开变量的 YAML。渲染文件可能带有本机路径，应留在本机。CLI 与 TrueNAS UI 选择一个作为同一实例的管理入口，不要重复启动两份争用音频设备。UI 管理的实例使用 UI 停止/启动和查看日志；CLI 命令示例仅管理 CLI 创建的实例。
 
 ## 日常操作与恢复
+
+0.1.2 将 PulseAudio 改为专用 `pulse` 用户运行，并由 `dbus-run-session` 提供私有会话总线。其 HOME 和运行目录归该用户所有；Unix 音频 socket 延续容器内匿名访问，显式禁用不使用的 cookie 认证。由此解决系统模式、HOME、缺失 cookie 及误连发现代理的 D-Bus 警告，同时保留音源切换必需的动态模块加载。无需设置 `--disallow-module-loading`，也无需放宽宿主 D-Bus 权限。硬件模式按实际 `/dev/snd` 字符设备的组号授予 Pulse 访问权，见 [0.1.2 验证记录](docs/verification-0.1.2.md)。
 
 `sh scripts/status.sh` 只读显示容器状态、协调器状态和 Pulse 模块；`owner` 是 `airplay`、`dlna`、`spotify` 或 `null`。停止当前客户端播放/断开连接后，旧音源不会自动恢复，必须重新开始播放才能争取输出。源暂停保留已打开的流不等于播放，协调器根据 Pulse 流的 active/corked 状态判断。
 
@@ -115,6 +117,7 @@ Windows 本机需要保留运行的软件演示，可使用 [本机部署说明]
 ```sh
 docker compose -f compose.test.yaml up -d --wait --wait-timeout 120
 python3 tests/integration.py
+python3 tests/pulse_startup.py
 python3 tests/recovery.py
 python3 tests/discovery.py
 docker compose -f compose.test.yaml down

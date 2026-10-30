@@ -3,16 +3,18 @@ import itertools
 import json
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 from runtime import (BridgeError, Child, Config, Coordinator, Pulse, Runtime, SOURCES,
                      Snapshot, Supervisor, atomic_write, avahi_config, child_environment,
-                     owns_udp_ports, persistent_machine_id, persistent_uuid, pulse_config, receiver_commands, shairport_config)
+                     owns_udp_ports, persistent_machine_id, persistent_uuid, pulse_config, pulse_context,
+                     receiver_commands, shairport_config)
 from healthcheck import healthy
 import healthcheck
 from runtime import avahi_available
@@ -325,6 +327,32 @@ class Process:
 
 
 class SupervisorTests(unittest.TestCase):
+    def test_pulse_identity_and_private_environment_are_applied_only_to_pulse(self):
+        popen = Mock(side_effect=lambda *args, **kwargs: Process())
+        supervisor = Supervisor(popen, lambda *args: None)
+        context = pulse_context(101, 102, "null")
+        supervisor.add("pulse", ["dbus-run-session", "--", "pulseaudio"], core=True, context=context)
+        supervisor.add("dlna", ["gmediarender"])
+        supervisor.tick(0)
+        pulse_args, receiver_args = [call.kwargs for call in popen.call_args_list]
+        self.assertEqual((pulse_args["user"], pulse_args["group"], pulse_args["extra_groups"]), (101, 102, (102,)))
+        self.assertEqual(pulse_args["env"]["HOME"], "/run/pulse/home")
+        self.assertEqual(pulse_args["env"]["XDG_RUNTIME_DIR"], "/run/pulse/runtime")
+        for key in ("DBUS_SYSTEM_BUS_ADDRESS", "DBUS_SESSION_BUS_ADDRESS", "PULSE_SERVER"):
+            self.assertNotIn(key, pulse_args["env"])
+        self.assertNotIn("user", receiver_args)
+        self.assertEqual(receiver_args["env"]["PULSE_SINK"], "dlna_bus")
+        self.assertIn("DBUS_SYSTEM_BUS_ADDRESS", receiver_args["env"])
+
+    def test_pulse_uses_actual_host_sound_device_groups(self):
+        devices = [Mock(), Mock(), Mock()]
+        for device, mode, gid in zip(devices, (stat.S_IFCHR, stat.S_IFCHR, stat.S_IFDIR), (987, 987, 999)):
+            device.stat.return_value = Mock(st_mode=mode, st_gid=gid)
+        with patch.object(Path, "iterdir", return_value=devices):
+            self.assertEqual(pulse_context(101, 102, "alsa").extra_groups, (102, 987))
+        with self.assertRaises(BridgeError):
+            pulse_context(0, 0, "null")
+
     def setUp(self):
         # The deployed runtime is Linux; keep its injected process model testable
         # on a Windows development host without exercising Windows process APIs.
@@ -446,12 +474,18 @@ class HealthTests(unittest.TestCase):
 class ReadinessTests(unittest.TestCase):
     def test_external_start_never_launches_a_second_mdns_stack(self):
         runtime = Runtime(Config(audio_mode="null", avahi_mode="external", enabled=()))
+        runtime.pulse_context = pulse_context(101, 102, "null")
         runtime.commands = {}
         with patch.object(runtime.supervisor, "add") as add, \
              patch.object(runtime, "wait_ready") as wait, \
              patch.object(runtime.pulse, "clear"):
             runtime.start()
         self.assertEqual([call.args[0] for call in add.call_args_list], ["pulse"])
+        pulse_call = add.call_args_list[0]
+        self.assertEqual(pulse_call.args[1][:3], ["dbus-run-session", "--", "pulseaudio"])
+        self.assertNotIn("--system", pulse_call.args[1])
+        self.assertNotIn("--disallow-module-loading", pulse_call.args[1])
+        self.assertIs(pulse_call.kwargs["context"], runtime.pulse_context)
         self.assertIs(wait.call_args_list[0].args[0], avahi_available)
 
     def test_external_discovery_failure_exits_instead_of_false_healthy(self):

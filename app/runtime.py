@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -187,7 +188,7 @@ def owns_udp_ports(pid: int, required: set[int]) -> bool:
 
 
 def pulse_config(config: Config) -> str:
-    lines = [".fail", "load-module module-native-protocol-unix socket=/run/lan-audio/pulse.sock auth-anonymous=1"]
+    lines = [".fail", "load-module module-native-protocol-unix socket=/run/lan-audio/pulse.sock auth-anonymous=1 auth-cookie-enabled=0"]
     for sink in (*[source + "_bus" for source in SOURCES], "discard"):
         lines.append(f"load-module module-null-sink sink_name={sink} rate={config.sample_rate} channels=2")
     if config.audio_mode == "null":
@@ -258,6 +259,33 @@ def child_environment(source: str | None = None) -> dict[str, str]:
     if source:
         env["PULSE_SINK"] = source + "_bus"
     return env
+
+
+@dataclasses.dataclass(frozen=True)
+class ProcessContext:
+    env: dict[str, str]
+    user: int
+    group: int
+    extra_groups: tuple[int, ...]
+
+
+def pulse_context(uid: int, gid: int, audio_mode: str,
+                  device_dir: Path = Path("/dev/snd")) -> ProcessContext:
+    if uid == 0:
+        raise BridgeError("PulseAudio requires a dedicated non-root user")
+    groups = {gid}
+    if audio_mode == "alsa":
+        # Docker passes host device ownership through; its audio GID can differ
+        # from the image's audio group. Grant only the passed sound device groups.
+        for device in device_dir.iterdir():
+            info = device.stat()
+            if stat.S_ISCHR(info.st_mode):
+                groups.add(info.st_gid)
+    env = {"PATH": child_environment()["PATH"], "LANG": "C.UTF-8",
+           "HOME": "/run/pulse/home", "XDG_RUNTIME_DIR": "/run/pulse/runtime"}
+    # dbus-run-session supplies a private session bus. Neither the discovery
+    # proxy nor receiver-specific Pulse client settings belong to this server.
+    return ProcessContext(env, uid, gid, tuple(sorted(groups)))
 
 
 @dataclasses.dataclass
@@ -410,6 +438,7 @@ class Child:
     started_at: float = 0
     next_start: float = 0
     deadline: float = 0
+    context: ProcessContext | None = None
 
 
 class Supervisor:
@@ -419,18 +448,23 @@ class Supervisor:
         self.killpg = killpg or getattr(os, "killpg", None)
         self.shutting_down = False
 
-    def add(self, name: str, argv: list[str], core: bool = False) -> None:
-        self.children[name] = Child(name, argv, core)
+    def add(self, name: str, argv: list[str], core: bool = False,
+            context: ProcessContext | None = None) -> None:
+        self.children[name] = Child(name, argv, core, context=context)
 
     def start(self, child: Child, now: float) -> None:
         try:
-            child.process = self.popen(child.argv, env=child_environment(None if child.core else child.name),
+            context = child.context
+            credentials = ({"user": context.user, "group": context.group,
+                            "extra_groups": context.extra_groups} if context else {})
+            child.process = self.popen(child.argv,
+                                       env=context.env if context else child_environment(None if child.core else child.name),
                                        stdin=subprocess.DEVNULL,
                                        # Receiver diagnostics can contain account ids, signed URLs
                                        # or metadata. Only safe lifecycle events are logged here.
                                        stdout=None if child.core else subprocess.DEVNULL,
                                        stderr=None if child.core else subprocess.DEVNULL,
-                                       start_new_session=True)
+                                       start_new_session=True, **credentials)
             child.state = "running"
             child.started_at = now
             LOG.info("%s started", child.name)
@@ -532,6 +566,7 @@ class Runtime:
         self.lock_file = None
         self.lock_acquired = False
         self.next_avahi_probe = 0.0
+        self.pulse_context: ProcessContext | None = None
 
     def write_status(self) -> None:
         status = {"schema": 1, "pid": os.getpid(), "heartbeat_unix": time.time(), "state": self.state,
@@ -552,6 +587,7 @@ class Runtime:
         except BlockingIOError:
             raise BridgeError("Another bridge supervisor is already running") from None
         pulse_user = pwd.getpwnam("pulse")
+        self.pulse_context = pulse_context(pulse_user.pw_uid, pulse_user.pw_gid, self.config.audio_mode)
         os.chown(RUN_DIR, pulse_user.pw_uid, pulse_user.pw_gid)
         os.chmod(RUN_DIR, 0o755)
         directories = [Path("/run/pulse")]
@@ -560,7 +596,10 @@ class Runtime:
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
             os.chmod(directory, 0o755)
-        os.chown("/run/pulse", pulse_user.pw_uid, pulse_user.pw_gid)
+        for directory in (Path("/run/pulse/home"), Path("/run/pulse/runtime")):
+            directory.mkdir(parents=True, exist_ok=True)
+            os.chown(directory, pulse_user.pw_uid, pulse_user.pw_gid)
+            os.chmod(directory, 0o700)
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         cache = DATA_DIR / "spotify"
         if cache.is_symlink():
@@ -606,6 +645,8 @@ class Runtime:
                 raise BridgeError("External Avahi unavailable; check the discovery proxy and host Avahi")
 
     def start(self) -> None:
+        if self.pulse_context is None:
+            raise BridgeError("PulseAudio process context has not been prepared")
         if self.config.avahi_mode == "external":
             self.wait_ready(avahi_available, failure="External Avahi unavailable; mount the filtered D-Bus socket and check host Avahi")
             self.next_avahi_probe = time.monotonic() + 5
@@ -616,10 +657,11 @@ class Runtime:
             self.supervisor.add("avahi", ["avahi-daemon", "--no-drop-root", "--no-chroot", "--no-rlimits",
                                           "--file=/run/lan-audio/avahi.conf"], core=True)
             self.wait_ready(lambda: Path("/run/avahi-daemon/socket").exists())
-        self.supervisor.add("pulse", ["pulseaudio", "--system", "--daemonize=no", "--disallow-exit",
+        self.supervisor.add("pulse", ["dbus-run-session", "--", "pulseaudio", "--daemonize=no", "--disallow-exit",
                                       "--exit-idle-time=-1", "--use-pid-file=no", "--log-target=stderr",
                                       "--log-level=notice", "--realtime=no", "--high-priority=no",
-                                      "--disable-shm=yes", "-n", "--file=/run/lan-audio/pulse.pa"], core=True)
+                                      "--disable-shm=yes", "-n", "--file=/run/lan-audio/pulse.pa"],
+                            core=True, context=self.pulse_context)
         self.wait_ready(lambda: bool(self.pulse.snapshot()))
         self.pulse.clear()
         if "airplay" in self.config.enabled:

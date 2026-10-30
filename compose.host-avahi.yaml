@@ -11,7 +11,7 @@ services:
       - avahi-bus:/run/dbus:ro
 
   discovery-proxy:
-    image: lan-audio-bridge:0.1.1
+    image: lan-audio-bridge:0.1.2
     pull_policy: never
     network_mode: none
     init: true

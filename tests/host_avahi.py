@@ -13,6 +13,8 @@ import subprocess
 import time
 import uuid
 
+from pulse_startup import verify_container
+
 
 HOST_SOURCE = r'''
 import json, os, socket, struct, subprocess, time
@@ -234,6 +236,7 @@ print(json.dumps(data, sort_keys=True))""").stdout.strip()
         audio = launch("external", [*common, "--env=AVAHI_MODE=external",
                                    "--mount=type=volume,src=" + proxy_bus + ",dst=/run/dbus,readonly"], "python3", ["/app/runtime.py"])
         eventually(lambda: execute(audio, "python3", "/app/healthcheck.py", check=False).returncode == 0, "external receiver health", timeout=90)
+        verify_container(audio)
         status = json.loads(execute(audio, "cat", "/run/lan-audio/status.json").stdout)
         assert status["avahi_mode"] == "external"
         assert not ({"dbus", "avahi"} & status["children"].keys()), "External mode started private discovery daemons"
