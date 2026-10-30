@@ -1,0 +1,18 @@
+# Local configuration and runtime state (may contain account data).
+.env
+.env.*
+!.env.example
+compose.rendered.yaml
+data/
+
+# Generated Python files and local validation output.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+test-results/
+
+# Local delivery archives and development-tool state.
+*.tar
+*.tar.gz
+.serena/
+dist/

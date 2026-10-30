@@ -1,0 +1,43 @@
+# Standalone test file: never merge with compose.yaml.
+name: lan-audio-bridge-test
+services:
+  audio:
+    image: lan-audio-bridge:0.1.0
+    pull_policy: never
+    init: true
+    restart: 'no'
+    stop_grace_period: 20s
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID, NET_BIND_SERVICE, KILL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DEVICE_NAME: LAB Isolated Test
+      AUDIO_MODE: 'null'
+      SAMPLE_RATE: '48000'
+      OUTPUT_VOLUME: '100'
+      ENABLE_AIRPLAY: 'true'
+      ENABLE_DLNA: 'true'
+      ENABLE_SPOTIFY: 'true'
+      NETWORK_INTERFACE: eth0
+      DLNA_PORT: '49494'
+      AIRPLAY_PORT: '7000'
+      SPOTIFY_PORT: '24879'
+    volumes:
+      - test-data:/data
+    tmpfs:
+      - /run:size=64m,mode=755
+      - /tmp:size=64m,mode=1777
+    healthcheck:
+      test: [CMD, python3, /app/healthcheck.py]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: '2'
+volumes:
+  test-data:

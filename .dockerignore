@@ -1,0 +1,13 @@
+**
+!Dockerfile
+!app/
+!app/**
+!scripts/
+!scripts/probe-host.sh
+!scripts/status.sh
+!docs/
+!docs/UPSTREAM.md
+**/__pycache__/
+**/*.pyc
+**/.env
+**/.env.*
