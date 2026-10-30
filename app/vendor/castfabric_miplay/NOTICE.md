@@ -9,10 +9,13 @@ cloud integration or install scripts are imported.
 
 Local changes:
 
-- control.py: propagate decoded pause/resume/close actions; paused GET_STATE uses
-  the existing non-playing value (3), rather than reporting playing (2). This
-  reuse is an implementation consistency choice, not independent confirmation
-  of the complete Xiaomi audio wire-state enumeration.
+- control.py: propagate decoded pause/resume/close actions; distinguish idle=0,
+  playing=2 and paused=3. GET_STATE on browse connections reads the active media
+  session; media notifications use the same local state calculation. State values
+  follow publicly documented receiver observations, not copied implementation code.
+- receiver.py: keep the absolute handshake deadline only before authentication.
+  After authentication, complete accepted commands renew a separate 120-second
+  idle deadline, allowing heartbeat-only device-list connections to stay alive.
 
 - receiver.py: forward configured friendly name and initial bounded volume into
   control sessions; detect volume changes through wrapped control commands;

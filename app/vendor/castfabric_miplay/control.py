@@ -6,6 +6,7 @@ import enum
 import hmac
 import json
 from dataclasses import dataclass
+from typing import Callable
 
 from .protocol import (
     Command,
@@ -19,6 +20,12 @@ from .protocol import (
     legacy_challenge_response,
 )
 from .safety import ModernSafetyReceiver
+
+
+class PlaybackState(enum.IntEnum):
+    IDLE = 0
+    PLAYING = 2
+    PAUSED = 3
 
 
 class ControlPhase(enum.Enum):
@@ -50,6 +57,7 @@ class LegacyReceiverSession:
         volume: int = 38,
         local_endpoint: tuple[str, int] | None = None,
         peer_endpoint: tuple[str, int] | None = None,
+        playback_state_provider: Callable[[], int] | None = None,
     ):
         if not 12 <= len(challenge) <= 17 or not challenge.isdigit():
             raise ValueError("legacy challenge must be 12 to 17 ASCII digits")
@@ -66,6 +74,7 @@ class LegacyReceiverSession:
         self.set_play_source_seen = False
         self._media_started = False
         self._paused = False
+        self._playback_state_provider = playback_state_provider
         self._notification_sequence = 1
         self._local_endpoint = local_endpoint
         self._peer_endpoint = peer_endpoint
@@ -149,12 +158,17 @@ class LegacyReceiverSession:
             return self._stop(f"unsupported legacy command 0x{frame.command:04x}")
         return handler(frame)
 
+    def local_playback_state(self) -> PlaybackState:
+        if self.phase is not ControlPhase.OPENED or not self._media_started:
+            return PlaybackState.IDLE
+        return PlaybackState.PAUSED if self._paused else PlaybackState.PLAYING
+
     def media_started(self) -> list[bytes]:
         if self.phase is not ControlPhase.OPENED or self._media_started:
             return []
         self._media_started = True
         first = self._notify("first-audiopcm", 1)
-        state = self._notify("state", 3 if self._paused else 2)
+        state = self._notify("state", self.local_playback_state())
         writes = [first, state]
         if self.safety is not None:
             return self.safety.wrap_writes(writes)
@@ -262,9 +276,10 @@ class LegacyReceiverSession:
         return self._ack(Command.SET_VOLUME_ACK, frame.sequence)
 
     def _get_state(self, frame: CommandFrame) -> ControlResult:
-        # Reuse this implementation's existing non-playing value; do not claim
-        # an independently verified Xiaomi wire-state enumeration.
-        state = 2 if self._media_started and not self._paused else 3
+        # A list/browse connection observes the active media session rather than
+        # inventing a paused song merely because this connection has no PCM.
+        state = (self._playback_state_provider() if self._playback_state_provider
+                 else self.local_playback_state())
         return self._empty_query_ack(frame, Command.GET_STATE_ACK, encode_scalar(state))
 
     def _get_media_info(self, frame: CommandFrame) -> ControlResult:

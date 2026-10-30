@@ -2,7 +2,7 @@
 name: lan-audio-bridge-local
 services:
   audio:
-    image: lan-audio-bridge:0.2.0
+    image: lan-audio-bridge:0.2.1
     pull_policy: never
     init: true
     restart: unless-stopped

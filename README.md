@@ -1,6 +1,8 @@
-# LAN Audio Bridge 0.2.0
+# LAN Audio Bridge 0.2.1
 
 在 TrueNAS SCALE（Linux amd64）上部署 AirPlay、通用 DLNA renderer、Spotify Connect 和实验性小米妙播（MiPlay）接收器，共用一只 USB 声卡输出。每个协议使用独立接收进程，PulseAudio 独占指定 ALSA 设备；协调器只允许一个音源通往硬件。新开始播放的音源接管输出，旧接收进程会断开并重启，因此旧手机不保证显示“暂停”。这不是无缝切歌或多房间同步产品。
+
+0.2.1 修复妙播列表探测连接被 15 秒握手期限误关闭的问题，并将无媒体状态从暂停改为 idle，避免空闲设备被误判为有一首无标题歌曲。独立探测连接会查询当前实际妙播会话的状态；不伪造歌名。见 [0.2.1 修复与验证](docs/verification-0.2.1.md)。
 
 0.2.0 新增妙播接收通道，并将 DLNA 播放端 PCM 缓冲默认设为 1000ms，以增加短时网络停顿的余量；代价是起播/恢复可能稍慢。妙播复用已有 Avahi，不另占 UDP 5353。实现范围见[妙播与播放缓冲](docs/miplay.md)，测试结果见[0.2.0 软件验证](docs/verification-0.2.0.md)。真实手机/HyperOS 兼容性仍须实测；本轮没有部署或操作 TrueNAS。
 
@@ -48,12 +50,12 @@ USB 转光纤设备必须被 Linux 识别成 USB Audio Class（UAC）声卡，�
 
 ## 构建与 CLI 部署
 
-以下命令在 Linux 项目目录执行。构建镜像需要下载上游依赖，镜像名为本地 `lan-audio-bridge:0.2.0`，没有假定存在的公共镜像仓库。
+以下命令在 Linux 项目目录执行。构建镜像需要下载上游依赖，镜像名为本地 `lan-audio-bridge:0.2.1`，没有假定存在的公共镜像仓库。
 
 ```sh
 git clone https://github.com/zxsama/lan-audio-bridge.git
 cd lan-audio-bridge
-docker build --tag lan-audio-bridge:0.2.0 .
+docker build --tag lan-audio-bridge:0.2.1 .
 cp .env.example .env
 ```
 
@@ -83,7 +85,7 @@ docker compose logs --tail=100 audio
 
 仓库发布源码与部署文件，不包含预构建镜像或本地 `dist/` 归档。请先按上节构建镜像，再部署或导出。
 
-先确保 NAS 本地 Docker 中已有镜像。如果在另一台 Linux amd64 机器构建，可执行 `docker save -o lan-audio-bridge-0.2.0.tar lan-audio-bridge:0.2.0`，自行传输到 NAS，再执行 `docker load -i lan-audio-bridge-0.2.0.tar`。项目脚本不会自动远程操作 NAS。
+先确保 NAS 本地 Docker 中已有镜像。如果在另一台 Linux amd64 机器构建，可执行 `docker save -o lan-audio-bridge-0.2.1.tar lan-audio-bridge:0.2.1`，自行传输到 NAS，再执行 `docker load -i lan-audio-bridge-0.2.1.tar`。项目脚本不会自动远程操作 NAS。
 
 填写 `.env` 后在 NAS 项目目录运行：
 

@@ -11,7 +11,7 @@
     "control.py": {
       "upstream_path": "miair/miplay/control.py",
       "upstream_sha256": "7c35250d9e10452d7b48ff3d52f45bd52b58e45b8f3d6d9fee471fb655753604",
-      "sha256": "7bb1140344eb667dc07fa09c431c6992620de0d71508170a782e3a813b6581f7"
+      "sha256": "88ac095b7f398704432acf80b5bb546fe5d2677c1204755306ee24e46ab0a867"
     },
     "LICENSE": {
       "upstream_path": "LICENSE",
@@ -36,7 +36,7 @@
     "receiver.py": {
       "upstream_path": "miair/miplay/receiver.py",
       "upstream_sha256": "d703444c4a4ce0fef9d07962830527632c1171cd0338b7ff82cb04e2af78e8cf",
-      "sha256": "821dc0eb55bfde53b6696a4cb7a1f676ed3d9ac7b409c7378b0a0adf82bc674d"
+      "sha256": "75a1c103c145d23a9d7c2da7ce6995afbedfb52c22bdb7c66648b304e7c1c0c5"
     },
     "rtsp.py": {
       "upstream_path": "miair/miplay/rtsp.py",

@@ -120,7 +120,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(HAS_PROTOCOL_DEPS, "install zeroconf and pycryptodome for protocol tests")
 class ProtocolTests(unittest.IsolatedAsyncioTestCase):
-    async def test_pause_query_reuses_non_playing_state_and_resume_restores_playing(self):
+    async def test_idle_playing_paused_and_resumed_states_are_distinct(self):
         from vendor.castfabric_miplay.control import ControlPhase, LegacyReceiverSession
         from vendor.castfabric_miplay.protocol import Command, CommandFrame, CommandFrameBuffer, decode_scalar
         session = LegacyReceiverSession(challenge=b"123456789012")
@@ -129,14 +129,13 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         def state():
             result = session.process(CommandFrame(Command.GET_STATE, 8, b""))
             return decode_scalar(CommandFrameBuffer().feed(result.writes[0])[0].payload)
-        inactive = state()
+        self.assertEqual(state(), 0)
         session.media_started()
-        playing = state()
-        self.assertNotEqual(inactive, playing)
+        self.assertEqual(state(), 2)
         session.process(CommandFrame(Command.PAUSE, 9, b""))
-        self.assertEqual(state(), inactive)
+        self.assertEqual(state(), 3)
         session.process(CommandFrame(Command.RESUME, 10, b""))
-        self.assertEqual(state(), playing)
+        self.assertEqual(state(), 2)
 
     async def test_wrapped_pause_exposes_the_decoded_business_action(self):
         from vendor.castfabric_miplay.control import ControlPhase, LegacyReceiverSession

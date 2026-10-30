@@ -1,4 +1,4 @@
-# 小米妙播与播放缓冲（0.2.0）
+# 小米妙播与播放缓冲（0.2.1）
 
 0.2.0 增加实验性 MiPlay 接收器。它接收音频并输出到 `miplay_bus`，由现有协调器送往唯一输出；不是只模拟一个设备名称。协议模块取自固定 MIT 版本 [CastFabric](https://github.com/DjangoAILab/CastFabric/tree/5b7733ee9185a85843606de6fe94867f7d5a42cf/miair/miplay)，本地修改和校验值随源码保留。
 
@@ -6,6 +6,12 @@
 小米手机 → MiPlay 控制/WFD RTSP → AAC 解码 → 48kHz 双声道 PCM
          → miplay_bus → 音源协调 → PulseAudio → USB 声卡 → 光纤
 ```
+
+## 列表稳定性和空闲显示
+
+0.2.1 将未认证连接的 15 秒握手期限与已认证连接的 120 秒闲置期限分开。手机发送完整合法心跳或查询会续期；未认证连接或只有零碎字节的连接不会无限保留。实际媒体传输继续使用独立媒体超时。
+
+设备查询返回 idle=0、playing=2、paused=3，未开始接收媒体时保持 idle；另一条列表探测连接也会读取当前妙播会话的状态。0.2.0 把无媒体状态报成 paused，可能让手机显示“暂无歌名”占位。修复不靠空格或假标题遮盖界面，实际手机显示效果仍需更新后确认。
 
 ## 配置和发现
 
@@ -35,7 +41,7 @@
 使用 `compose.test.yaml` 的独立 bridge/null 输出实例，无宿主声卡和公开端口；不要向生产容器运行注入或故障测试。
 
 ```sh
-docker build -t lan-audio-bridge:0.2.0 .
+docker build -t lan-audio-bridge:0.2.1 .
 docker compose -f compose.test.yaml up -d --wait --wait-timeout 120
 python3 tests/integration.py
 python3 tests/discovery.py
@@ -47,7 +53,7 @@ python3 tests/dlna_jitter.py --format flac --label buffered
 
 ```sh
 docker run --rm --network none -v "$PWD:/workspace:ro" --entrypoint python3 \
-  lan-audio-bridge:0.2.0 -B -m unittest discover -s /workspace/tests -p 'test_*.py' -v
+  lan-audio-bridge:0.2.1 -B -m unittest discover -s /workspace/tests -p 'test_*.py' -v
 ```
 
 `tests/miplay_sender.py` 用同一固定版本的模拟发送端执行控制、RTSP 和 AAC 传输，并从真实 Pulse 输出录音。它不是手机应用，不证明独立实现之间的兼容性。执行时仅选择隔离 null 容器，目标地址为该测试容器的 bridge IPv4。
@@ -56,7 +62,7 @@ docker run --rm --network none -v "$PWD:/workspace:ro" --entrypoint python3 \
 cid=$(docker compose -f compose.test.yaml ps -q audio)
 ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$cid")
 docker exec -i "$cid" python3 - --target "$ip" --source-address "$ip" --duration 4 < tests/miplay_sender.py
-python3 tests/host_avahi.py --image lan-audio-bridge:0.2.0
+python3 tests/host_avahi.py --image lan-audio-bridge:0.2.1
 docker compose -f compose.test.yaml down
 ```
 

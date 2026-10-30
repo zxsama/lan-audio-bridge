@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 
 from zeroconf import IPVersion, Zeroconf
 
-from .control import ControlPhase, LegacyReceiverSession
+from .control import ControlPhase, LegacyReceiverSession, PlaybackState
 from .mdns import MiPlayIdentity
 from .media import (
     FfmpegMpegTsDecoder,
@@ -46,6 +46,7 @@ class MiPlayReceiver:
         handshake_timeout: float = 15.0,
         initial_volume: int = 100,
         media_idle_timeout: float = 30.0,
+        control_idle_timeout: float = 120.0,
     ):
         self.host = host
         self.port = port
@@ -59,6 +60,7 @@ class MiPlayReceiver:
         self.handshake_timeout = max(0.05, float(handshake_timeout))
         self.initial_volume = max(0, min(100, initial_volume))
         self.media_idle_timeout = max(0.05, float(media_idle_timeout))
+        self.control_idle_timeout = max(0.05, float(control_idle_timeout))
         self._server: asyncio.AbstractServer | None = None
         self._zeroconf: Zeroconf | None = None
         self._service_info = None
@@ -66,6 +68,7 @@ class MiPlayReceiver:
         self._idle = asyncio.Event()
         self._idle.set()
         self._active_session = False
+        self._active_control: LegacyReceiverSession | None = None
         self._claim_lock = asyncio.Lock()
         self._last_session: dict | None = None
         self._pending_volume: int | None = None
@@ -152,6 +155,11 @@ class MiPlayReceiver:
             "last_session": dict(self._last_session) if self._last_session else None,
         }
 
+    def playback_state(self) -> PlaybackState:
+        if self._active_control is None:
+            return PlaybackState.IDLE
+        return self._active_control.local_playback_state()
+
     async def _accept_control(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
@@ -175,6 +183,7 @@ class MiPlayReceiver:
             volume=self.initial_volume,
             local_endpoint=local_endpoint,
             peer_endpoint=peer_endpoint,
+            playback_state_provider=self.playback_state,
         )
         report = {
             "peer": "<local-address>" if peer else "unknown",
@@ -195,6 +204,7 @@ class MiPlayReceiver:
         handshake_deadline = (
             asyncio.get_running_loop().time() + self.handshake_timeout
         )
+        control_idle_deadline = handshake_deadline
 
         async def write_control(writes: list[bytes]) -> None:
             if not writes or writer.is_closing():
@@ -209,7 +219,8 @@ class MiPlayReceiver:
             while True:
                 if wfd_task is None:
                     remaining = (
-                        handshake_deadline - asyncio.get_running_loop().time()
+                        (control_idle_deadline if session.authenticated else handshake_deadline)
+                        - asyncio.get_running_loop().time()
                     )
                     if remaining <= 0:
                         raise asyncio.TimeoutError()
@@ -245,6 +256,12 @@ class MiPlayReceiver:
                         await write_control(result.writes)
                     if not result.accepted:
                         raise ProtocolError(result.reason)
+                    if session.authenticated:
+                        # Only complete accepted frames renew a browse session.
+                        # Keep the original absolute deadline before authentication.
+                        control_idle_deadline = (
+                            asyncio.get_running_loop().time() + self.control_idle_timeout
+                        )
                     if session.phase is ControlPhase.STOPPED:
                         # Includes CLOSE inside the modern control envelope.
                         # Returning executes the same complete cleanup as EOF.
@@ -265,6 +282,8 @@ class MiPlayReceiver:
                                 if self._active_session:
                                     raise ProtocolError("concurrent sender")
                                 self._active_session = True
+                                self._active_control = session
+                            session_reported = True
                             await self._emit_lifecycle(
                                 "session_started",
                                 {
@@ -272,7 +291,6 @@ class MiPlayReceiver:
                                     "media_format": "mpegts",
                                 },
                             )
-                            session_reported = True
                             # A previous session may have left the input bus at
                             # zero. Restore the value reported to this sender.
                             self._queue_volume(session.volume)
@@ -311,6 +329,8 @@ class MiPlayReceiver:
             if session_reported:
                 async with self._claim_lock:
                     self._active_session = False
+                    if self._active_control is session:
+                        self._active_control = None
             if session_reported:
                 await self._emit_lifecycle(
                     "session_ended",
