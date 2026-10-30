@@ -1,7 +1,7 @@
 name: lan-audio-bridge
 services:
   audio:
-    image: lan-audio-bridge:0.1.2
+    image: lan-audio-bridge:0.2.0
     pull_policy: never
     network_mode: host
     init: true
@@ -22,10 +22,14 @@ services:
       ENABLE_AIRPLAY: ${ENABLE_AIRPLAY:-true}
       ENABLE_DLNA: ${ENABLE_DLNA:-true}
       ENABLE_SPOTIFY: ${ENABLE_SPOTIFY:-true}
+      ENABLE_MIPLAY: ${ENABLE_MIPLAY:-true}
+      DLNA_BUFFER_MS: ${DLNA_BUFFER_MS:-1000}
+      OUTPUT_BUFFER_MS: ${OUTPUT_BUFFER_MS:-200}
       NETWORK_INTERFACE: ${NETWORK_INTERFACE:-}
       DLNA_PORT: ${DLNA_PORT:-49494}
       AIRPLAY_PORT: ${AIRPLAY_PORT:-7000}
       SPOTIFY_PORT: ${SPOTIFY_PORT:-24879}
+      MIPLAY_PORT: ${MIPLAY_PORT:-8899}
     volumes:
       - type: bind
         source: ${DATA_DIR:?Set an existing dedicated absolute host directory in .env}

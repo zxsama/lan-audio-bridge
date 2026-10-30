@@ -6,6 +6,7 @@ No published ports, sound devices, credentials, or third-party Python packages.
 This proves container-network discovery, not phone/LAN discovery or playback.
 """
 import argparse
+import base64
 import ipaddress
 import json
 from pathlib import Path
@@ -19,7 +20,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 NETWORK = "lan-audio-bridge-test_default"
-SERVICES = ("_airplay._tcp.local", "_raop._tcp.local", "_spotify-connect._tcp.local")
+SERVICES = ("_airplay._tcp.local", "_raop._tcp.local", "_spotify-connect._tcp.local", "_mi-connect._udp.local")
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -135,7 +136,7 @@ def discover_mdns(target_ip):
                         if port and txt and target_ip in addresses:
                             result[service] = (port, txt[-1])
             if len(result) == len(SERVICES):
-                print("PASS: multicast mDNS PTR/SRV/TXT/A for AirPlay, RAOP, Spotify", flush=True)
+    print("PASS: multicast mDNS PTR/SRV/TXT/A for AirPlay, RAOP, Spotify, MiPlay", flush=True)
                 return result
     missing = [service for service in SERVICES if service not in result]
     raise AssertionError("Incomplete mDNS records: " + ", ".join(missing))
@@ -242,6 +243,18 @@ def test_spotify(ip, records, device_name):
     print("PASS: advertised Spotify zeroconf getInfo; no active account", flush=True)
 
 
+def test_miplay(ip, records, device_name):
+    port, txt = records[SERVICES[3]]
+    assert port == 56666, "Unexpected MiConnect discovery service port"
+    assert txt.get("name") == device_name and txt.get("apps") == "[5]", "MiPlay identity missing"
+    data = base64.b64decode(txt["appsdata"], validate=True)
+    assert len(data) > 28 and data[0] == 0x81 and data[2] == len(data) - 3, "Invalid MiPlay app data"
+    control_port = struct.unpack_from(">H", data, 5)[0]
+    with socket.create_connection((ip, control_port), timeout=5) as sock:
+        assert sock.recv(128), "Advertised MiPlay control endpoint did not respond"
+    print("PASS: MiPlay mDNS identity/address and advertised TCP control endpoint (no phone compatibility claim)", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--container", help="Explicit compose.test.yaml audio container ID")
@@ -255,6 +268,7 @@ def main():
         test_ssdp(args.target_ip, args.device_name)
         test_airplay(args.target_ip, records)
         test_spotify(args.target_ip, records, args.device_name)
+        test_miplay(args.target_ip, records, args.device_name)
         print("PASS: independent-container discovery and accountless handshakes. Phone/LAN/playback remain separate.", flush=True)
         return
 

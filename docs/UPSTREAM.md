@@ -6,6 +6,7 @@ This project builds one Linux amd64 image from the official Debian image and ups
 
 | Component | Revision | Source and licence |
 | --- | --- | --- |
+| CastFabric MiPlay subset | `5b7733ee9185a85843606de6fe94867f7d5a42cf` | [Source](https://github.com/DjangoAILab/CastFabric/tree/5b7733ee9185a85843606de6fe94867f7d5a42cf/miair/miplay), MIT; vendored at `app/vendor/castfabric_miplay`, with original and delivered SHA256 in `SOURCE.json`, retained `LICENSE` and local patch notes in `NOTICE.md` |
 | Debian | `trixie-slim`, manifest digest `sha256:89c1ea91e897f0fe0a3731595330bc45b8bdef4047464a07116f891a94054b31` | [Docker Official Image](https://hub.docker.com/_/debian); individual Debian package licences apply |
 | Shairport Sync | `5.6.2`, commit `0a34fbda83724cc06266aadcf7c88acc8fef4e7d` | [Source](https://github.com/mikebrady/shairport-sync/tree/0a34fbda83724cc06266aadcf7c88acc8fef4e7d), [MIT and component notices](https://github.com/mikebrady/shairport-sync/blob/0a34fbda83724cc06266aadcf7c88acc8fef4e7d/LICENSES) |
 | nqptp | `1.2.9`, commit `ab8fb67483411640fd7f1e193889482f2421c37c` | [Source](https://github.com/mikebrady/nqptp/tree/ab8fb67483411640fd7f1e193889482f2421c37c), [GPL-2.0-only](https://github.com/mikebrady/nqptp/blob/ab8fb67483411640fd7f1e193889482f2421c37c/LICENSE) |
@@ -30,6 +31,8 @@ The final image installs `xdg-dbus-proxy` and checks its Debian package version 
 The optional host-Avahi deployment runs this proxy in a separate container with explicit method/signal filters. The audio container cannot access the original host bus socket; Debian's [package description](https://packages.debian.org/trixie/xdg-dbus-proxy) explicitly requires this separation for filtering to be effective. Proxy protocol behavior is documented in the [upstream manual](https://github.com/flatpak/xdg-dbus-proxy/blob/main/xdg-dbus-proxy.xml). Application integration and recovery checks are separate from package availability; see [host-avahi.md](host-avahi.md).
 
 ## Notices and source availability
+
+MiPlay includes only the pinned protocol modules and their offline simulator, not the CastFabric product server, account integrations or installer. The Docker build validates delivered source hashes and imports the receiver. Debian supplies `python3-dbus`, `python3-zeroconf`, `python3-pycryptodome` and FFmpeg; package copyright files are retained. Zeroconf is used for protocol data structures; the deployed adapter publishes through existing Avahi D-Bus and never starts its own Zeroconf socket. Modified protocol sources and notices are available verbatim inside `/app/vendor/castfabric_miplay/` and in this repository. This is an independent, experimental receiver, without a Xiaomi compatibility or certification claim.
 
 No licence has been specified for this repository's original code. The upstream licences listed above apply to their respective components, not automatically to this project's coordinator, scripts or documentation. This repository publishes source and build instructions; it does not include a prebuilt container image.
 

@@ -2,7 +2,7 @@
 name: lan-audio-bridge-local
 services:
   audio:
-    image: lan-audio-bridge:0.1.2
+    image: lan-audio-bridge:0.2.0
     pull_policy: never
     init: true
     restart: unless-stopped
@@ -19,6 +19,10 @@ services:
       ENABLE_AIRPLAY: 'true'
       ENABLE_DLNA: 'true'
       ENABLE_SPOTIFY: 'true'
+      ENABLE_MIPLAY: 'true'
+      DLNA_BUFFER_MS: '1000'
+      OUTPUT_BUFFER_MS: '200'
+      MIPLAY_PORT: '8899'
       NETWORK_INTERFACE: eth0
       DLNA_PORT: '49494'
       AIRPLAY_PORT: '7000'

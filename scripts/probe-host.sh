@@ -22,11 +22,11 @@ printf '\n== Network links ==\n'
 if command -v ip >/dev/null 2>&1; then ip -brief link; ip -brief address; fi
 printf '\n== Relevant listening sockets (review owners; no service changes) ==\n'
 if command -v ss >/dev/null 2>&1; then
-  ss -H -lntup | awk '$5 ~ /:(319|320|1900|5353|7000|9000|24879|49494)$/ {print}'
+  ss -H -lntup | awk '$5 ~ /:(319|320|1900|5353|7000|8899|9000|24879|49494)$/ {print}'
 else
   printf 'ss unavailable; nothing installed.\n'
 fi
-printf '\nReview UDP 319/320/9000 (NQPTP), UDP 5353 (mDNS), UDP 1900 (SSDP), TCP 7000/24879/49494.\n'
+printf '\nReview UDP 319/320/9000 (NQPTP), UDP 5353 (mDNS), UDP 1900 (SSDP), TCP 7000/8899/24879/49494.\n'
 printf 'Shared discovery sockets may coexist; timing/control conflicts need investigation.\n'
 printf 'Configured non-default receiver ports and dynamic media ports need separate inspection.\n'
 printf 'This script did not install packages, play audio, open devices, or stop services.\n'

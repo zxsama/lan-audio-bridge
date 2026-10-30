@@ -1,6 +1,6 @@
 # Windows 本机软件演示部署
 
-此部署用于本机 Docker 软件验证，USB 转光纤设备尚未连接。当前配置要求 Ubuntu WSL 中已有 `lan-audio-bridge:0.1.1` 镜像，固定 `AUDIO_MODE=null`，不会向 Windows 或 USB 声卡输出声音，也不能据此确认光纤音频可用。更新配置前先构建或导入对应镜像；历史验证记录中的旧镜像版本保持原样。
+此部署用于本机 Docker 软件验证，不访问真实声卡。当前配置要求 Ubuntu WSL 中已有 `lan-audio-bridge:0.2.0` 镜像，固定 `AUDIO_MODE=null`，不会向 Windows 或 USB 声卡输出声音，也不能据此确认光纤音频可用。更新配置前先构建或导入对应镜像；历史验证记录中的旧镜像版本保持原样。
 
 在 Windows PowerShell 中切换到本项目目录：
 

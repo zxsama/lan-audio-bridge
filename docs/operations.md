@@ -54,7 +54,8 @@
 停止服务后用 TrueNAS 数据集快照或自己认可的备份方式备份专用 `/data`，保留 `.env`、Compose 和旧镜像。新镜像先在 `compose.test.yaml` 验证，再安排实际声卡验收。生产切换会中断会话。
 
 ```sh
-docker image tag lan-audio-bridge:0.1.1 lan-audio-bridge:rollback
+# 将 CURRENT_VERSION 替换为当前实例实际使用的镜像版本（含自定义标签）。
+docker image tag lan-audio-bridge:CURRENT_VERSION lan-audio-bridge:rollback
 docker compose stop audio
 # 构建/导入并验证更新镜像后：
 docker compose up -d --force-recreate

@@ -1,6 +1,6 @@
 # 复用 NAS 的 Avahi 发现服务
 
-0.1.1 提供 `AVAHI_MODE=external`，用于已经运行 Avahi 的 Linux NAS。音频容器保持 host network，由独立 `discovery-proxy` 容器向宿主 Avahi 申请 AirPlay/Spotify 服务公告；不停止 NAS 服务，不修改宿主 Avahi 或 D-Bus 全局配置。默认 `AVAHI_MODE=internal` 仍在音频容器内运行自己的 D-Bus 和 Avahi。
+自 0.1.1 起提供 `AVAHI_MODE=external`，用于已经运行 Avahi 的 Linux NAS。音频容器保持 host network，由独立 `discovery-proxy` 容器向宿主 Avahi 申请 AirPlay/Spotify/MiPlay 服务公告；不停止 NAS 服务，不修改宿主 Avahi 或 D-Bus 全局配置。默认 `AVAHI_MODE=internal` 仍在音频容器内运行自己的 D-Bus 和 Avahi。
 
 ## 5353 冲突的原因
 
@@ -20,7 +20,7 @@ test -S /run/dbus/system_bus_socket && echo DBUS_SOCKET_OK
 
 ## 安装与 TrueNAS YAML
 
-按 [README](../README.md) 构建本地镜像 `lan-audio-bridge:0.1.2`，创建专用数据集并填写 `.env` 的 `DATA_DIR`、`AUDIO_DEVICE`。此模式仍需要真实声卡映射和既有音频配置，仅改变发现服务的接入方式。
+按 [README](../README.md) 构建本地镜像 `lan-audio-bridge:0.2.0`，创建专用数据集并填写 `.env` 的 `DATA_DIR`、`AUDIO_DEVICE`。此模式仍需要真实声卡映射和既有音频配置，仅改变发现服务的接入方式。
 
 在 Linux 项目目录执行：
 
@@ -66,8 +66,8 @@ Avahi 的动态对象位于 `/ClientN/EntryGroupN` 等路径，规则不固定�
 
 完成软件与实机验收时分别记录：
 
-- 独立隔离测试 `python3 -B tests/host_avahi.py --image lan-audio-bridge:0.1.2` 的实际输出，确认代理访问限制、动态公告及故障恢复；该测试不访问真实宿主总线或声卡，运行说明见[开发文档](development.md)。
-- NAS 上两个容器健康、`audio` 无内部 D-Bus/Avahi，客户端能发现并连接 AirPlay/Spotify；DLNA 仍按原路径验收。
+- 独立隔离测试 `python3 -B tests/host_avahi.py --image lan-audio-bridge:0.2.0` 的实际输出，确认代理访问限制、动态公告及故障恢复；该测试不访问真实宿主总线或声卡，运行说明见[开发文档](development.md)。
+- NAS 上两个容器健康、`audio` 无内部 D-Bus/Avahi，客户端能发现并连接 AirPlay/Spotify；启用 MiPlay 时按其兼容范围单独验收；DLNA 仍按原路径验收。
 - 重建音频容器、重启代理后，重新注册、手机重新发现及实际播放均恢复。CLI 部署可在允许中断播放时用组合命令 `restart discovery-proxy`；GUI 部署使用对应管理入口。
 - 宿主 Avahi 重启后重新公告与播放恢复，只在允许维护宿主发现服务的窗口验收；不要为本项目调试擅自停启它。隔离测试通过不能代替真实 NAS 的此项记录。
 - 真实 AirPlay 2 手机传音、Spotify 账号播放、跨协议切换及 USB 光纤出声，按[运维文档](operations.md)单独验收。

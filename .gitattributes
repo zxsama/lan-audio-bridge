@@ -4,3 +4,5 @@
 *.yaml text eol=lf
 *.md text eol=lf
 Dockerfile text eol=lf
+# Preserve the pinned upstream file byte-for-byte, including its final blank line.
+app/vendor/castfabric_miplay/rtsp.py whitespace=-blank-at-eof

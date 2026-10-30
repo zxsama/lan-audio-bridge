@@ -1,6 +1,6 @@
 # 开发与测试
 
-本项目运行层只使用 Python 标准库；音频与协议依赖由 Dockerfile 安装。生产目标为 Linux amd64。Windows 本机部署通过 Ubuntu WSL 使用 Docker，见 [本机部署说明](local-deployment.md)。
+监督器使用 Python 标准库；妙播适配层另用 Debian 提供的 D-Bus、Zeroconf 数据类型和加密包，音频依赖由 Dockerfile 安装。生产目标为 Linux amd64。Windows 本机部署通过 Ubuntu WSL 使用 Docker，见 [本机部署说明](local-deployment.md)。
 
 ## 目录
 
@@ -34,7 +34,7 @@ python3 -B -m unittest discover -s tests -p test_runtime.py -v
 在 Linux/WSL 项目目录构建并运行独立测试实例：
 
 ```sh
-docker build -t lan-audio-bridge:0.1.1 .
+docker build -t lan-audio-bridge:0.2.0 .
 docker compose -f compose.test.yaml config --quiet
 docker compose -f compose.test.yaml up -d --wait --wait-timeout 120
 python3 -B tests/integration.py
@@ -55,7 +55,7 @@ docker compose -f compose.test.yaml down
 构建当前镜像后，可独立执行：
 
 ```sh
-python3 -B tests/host_avahi.py --image lan-audio-bridge:0.1.1
+python3 -B tests/host_avahi.py --image lan-audio-bridge:0.2.0
 ```
 
 该脚本在临时 Docker 网络命名空间中模拟独占 5353 的 Avahi、私有 D-Bus 和独立过滤代理，使用独立资源前缀并清理测试资源；不使用真实 host network、宿主 D-Bus、声卡、账号或发布端口。应检查代理访问限制、动态服务公告与失联恢复的实际输出。本节提供运行方法，不代表本轮脚本已通过；执行结果应单独记录。
@@ -67,3 +67,9 @@ python3 -B tests/host_avahi.py --image lan-audio-bridge:0.1.1
 `.env`、`data/`、`test-results/`、`dist/`、`.serena/` 和 Python 缓存均被 Git 忽略。账号状态保存在部署的数据卷或目录中，不进入源码。原始日志分享前应另行检查；公开验证记录只保留必要结论与复现方法。
 
 `.dockerignore` 使用白名单：构建只接收应用代码、两份容器内 shell 脚本、Dockerfile 和上游来源文档。Windows/WSL 管理程序、测试、交付归档和本机状态不会复制到运行镜像中。
+
+## 0.2.0 回归
+
+`test_runtime.py` 无需外部依赖；`test_miplay.py` 的完整协议测试需要镜像内依赖和 FFmpeg。缺依赖时会跳过相应项目，不能算完整通过。构建时验证 vendor SOURCE.json 中的 SHA256。
+
+新增 `tests/dlna_jitter.py --format wav` 和 `--format flac`：在隔离 null 容器内模拟 HTTP 500ms 停顿，检查持续 PCM、路由和 Pause/Resume/Seek/Stop。`--label` 仅标记输出，`--container` 选择已经启动的隔离测试容器。妙播模拟发送测试见 [miplay.md](miplay.md)。

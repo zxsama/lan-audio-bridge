@@ -78,12 +78,15 @@ RUN shairport-sync -V | tee /tmp/shairport-version \
 
 FROM base AS final
 RUN apt-get update && apt-get install -y --no-install-recommends xdg-dbus-proxy \
+    ffmpeg python3-dbus python3-zeroconf python3-pycryptodome \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' xdg-dbus-proxy)" ge '0.1.6-1+deb13u3' \
     && command -v dbus-run-session \
     && dpkg-query -W > /usr/local/share/doc/lan-audio-bridge/debian-packages.txt \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY app/ /app/
+RUN python3 -c 'import dbus, zeroconf; from vendor.castfabric_miplay.receiver import MiPlayReceiver; import hashlib, json, pathlib; p = pathlib.Path("/app/vendor/castfabric_miplay"); m = json.loads((p / "SOURCE.json").read_text()); assert all(hashlib.sha256((p / n).read_bytes()).hexdigest() == v["sha256"] for n, v in m["files"].items())' \
+    && gst-inspect-1.0 queue >/dev/null && ffmpeg -version >/dev/null
 COPY scripts/probe-host.sh scripts/status.sh /app/scripts/
 COPY docs/UPSTREAM.md /usr/local/share/doc/lan-audio-bridge/UPSTREAM.md
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1

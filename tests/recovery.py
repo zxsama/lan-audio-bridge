@@ -155,7 +155,7 @@ def main():
     eventually(healthy, "production receivers remain healthy after process-group tests")
     identity = execute("cat", "/data/dlna.uuid")
     machine_id = execute("cat", "/data/dbus-machine-id")
-    for name in ("airplay", "dlna", "spotify"):
+    for name in ("airplay", "dlna", "spotify", "miplay"):
         before = status()["children"][name]["restarts"]
         old_pid = kill_child(name)
 

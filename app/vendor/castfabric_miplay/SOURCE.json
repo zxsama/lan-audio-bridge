@@ -1,0 +1,57 @@
+{
+  "repository": "https://github.com/DjangoAILab/CastFabric",
+  "commit": "5b7733ee9185a85843606de6fe94867f7d5a42cf",
+  "license": "MIT",
+  "files": {
+    "__init__.py": {
+      "upstream_path": "miair/miplay/__init__.py",
+      "upstream_sha256": "cdc3292a7be6ca734c5a064af898ee49dac47ca89b2e7b98bcfd927b878b7387",
+      "sha256": "cdc3292a7be6ca734c5a064af898ee49dac47ca89b2e7b98bcfd927b878b7387"
+    },
+    "control.py": {
+      "upstream_path": "miair/miplay/control.py",
+      "upstream_sha256": "7c35250d9e10452d7b48ff3d52f45bd52b58e45b8f3d6d9fee471fb655753604",
+      "sha256": "7bb1140344eb667dc07fa09c431c6992620de0d71508170a782e3a813b6581f7"
+    },
+    "LICENSE": {
+      "upstream_path": "LICENSE",
+      "upstream_sha256": "b7243abc644915bf252e131b20dbeacd3d3ad0db5757651f3ba82236553afade",
+      "sha256": "b7243abc644915bf252e131b20dbeacd3d3ad0db5757651f3ba82236553afade"
+    },
+    "mdns.py": {
+      "upstream_path": "miair/miplay/mdns.py",
+      "upstream_sha256": "87e2cb87db41b665000d1786c26871d7d1990e2913dffc804319952944246403",
+      "sha256": "87e2cb87db41b665000d1786c26871d7d1990e2913dffc804319952944246403"
+    },
+    "media.py": {
+      "upstream_path": "miair/miplay/media.py",
+      "upstream_sha256": "c6fa1ab342d30fe7415367ce9d970a964a418fd3ae81c089f57b5640b399e051",
+      "sha256": "cd9fe2c790aef435784948f0175b5e03dbc9a274b68ca88e16be1671d4c9c1ca"
+    },
+    "protocol.py": {
+      "upstream_path": "miair/miplay/protocol.py",
+      "upstream_sha256": "5fab15a72769b01965620bc4d16e21e435aabd5595684ea7ff34ca17c1915a28",
+      "sha256": "5fab15a72769b01965620bc4d16e21e435aabd5595684ea7ff34ca17c1915a28"
+    },
+    "receiver.py": {
+      "upstream_path": "miair/miplay/receiver.py",
+      "upstream_sha256": "d703444c4a4ce0fef9d07962830527632c1171cd0338b7ff82cb04e2af78e8cf",
+      "sha256": "821dc0eb55bfde53b6696a4cb7a1f676ed3d9ac7b409c7378b0a0adf82bc674d"
+    },
+    "rtsp.py": {
+      "upstream_path": "miair/miplay/rtsp.py",
+      "upstream_sha256": "e56689df35ee8bffdc88e71c2eaff425f16a69ce749cfc8a0a777eaa7f56645b",
+      "sha256": "e56689df35ee8bffdc88e71c2eaff425f16a69ce749cfc8a0a777eaa7f56645b"
+    },
+    "safety.py": {
+      "upstream_path": "miair/miplay/safety.py",
+      "upstream_sha256": "98468cf4f603af9f4a583250966aa7b4892736099e6b120d19df49d57b5c9822",
+      "sha256": "93c3c1d51e90907fff0601869959f7732b068a3654b664057c7be6fff7c56483"
+    },
+    "simulator.py": {
+      "upstream_path": "miair/miplay/simulator.py",
+      "upstream_sha256": "798368be38c80e2a9309844a8061811c038bdbc0e581e39e0aa1239e5d82ca39",
+      "sha256": "9fb01f2deae0d6675417d9a000c23a9e136bafddd53c275fac6685b2eac7eeb7"
+    }
+  }
+}

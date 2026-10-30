@@ -30,7 +30,7 @@ from xml.sax.saxutils import escape
 
 SERVER = "unix:/run/lan-audio/pulse.sock"
 RATE = 48000
-FREQUENCIES = {"airplay": 440, "dlna": 660, "spotify": 880}
+FREQUENCIES = {"airplay": 440, "dlna": 660, "spotify": 880, "miplay": 1100}
 
 
 def command(*args):
@@ -169,12 +169,13 @@ def assert_audio(frequency, others=()):
 
 
 def test_arbitration():
-    print("Pulse: all six directed takeovers, sole route, recorded audio, no stale fallback", flush=True)
+    print("Pulse: all twelve directed takeovers, sole route, recorded audio, no stale fallback", flush=True)
     eventually(lambda: route(None), "startup has no output route")
     tones = {}
     old_owner = None
     try:
-        for source in ("airplay", "dlna", "spotify", "airplay", "spotify", "dlna", "airplay"):
+        for source in ("airplay", "dlna", "airplay", "spotify", "dlna", "spotify", "miplay",
+                       "dlna", "miplay", "spotify", "airplay", "miplay", "airplay"):
             if source in tones:
                 tones.pop(source).close()
                 time.sleep(0.4)
@@ -188,7 +189,7 @@ def test_arbitration():
                 eventually(lambda: status()["children"][old_owner]["pid"] not in (before, None),
                            "losing receiver restarted")
             old_owner = source
-        for source in ("dlna", "spotify"):
+        for source in ("dlna", "spotify", "miplay"):
             tones.pop(source).close()
         time.sleep(0.5)
         assert route("airplay"), "Late old-stream end must not release current owner"

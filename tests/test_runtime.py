@@ -53,7 +53,7 @@ class CoordinatorTests(unittest.TestCase):
         self.assertIsNone(self.coordinator.owner)
         self.assertEqual(self.pulse.events, [])
 
-    def test_all_six_cross_protocol_transitions_unload_first(self):
+    def test_all_cross_protocol_transitions_unload_first(self):
         for first, second in itertools.permutations(SOURCES, 2):
             with self.subTest(first=first, second=second):
                 pulse, stops = FakePulse(), []
@@ -152,7 +152,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(Config.from_env({"AUDIO_DEVICE": "hw:CARD=USB,DEV=0"}).output_volume, 70)
 
     def test_null_mode_and_independent_enable_switches(self):
-        config = Config.from_env({"AUDIO_MODE": "null", "ENABLE_SPOTIFY": "false", "ENABLE_AIRPLAY": "false"})
+        config = Config.from_env({"AUDIO_MODE": "null", "ENABLE_SPOTIFY": "false", "ENABLE_AIRPLAY": "false", "ENABLE_MIPLAY": "false"})
         self.assertEqual(config.enabled, ("dlna",))
         self.assertEqual(list(receiver_commands(config, "test")), ["dlna"])
 
@@ -170,10 +170,35 @@ class ConfigurationTests(unittest.TestCase):
     def test_duplicate_enabled_ports_are_rejected(self):
         with self.assertRaises(BridgeError):
             Config.from_env({"AUDIO_MODE": "null", "SPOTIFY_PORT": "7000"})
+        with self.assertRaises(BridgeError):
+            Config.from_env({"AUDIO_MODE": "null", "MIPLAY_PORT": "7000"})
+
+    def test_buffer_limits_and_unbuffered_dlna_fallback(self):
+        for key, values in {"DLNA_BUFFER_MS": ("-1", "5001", "1.5"),
+                            "OUTPUT_BUFFER_MS": ("0", "1001", "50\n")}.items():
+            for value in values:
+                with self.subTest(key=key, value=value), self.assertRaises(BridgeError):
+                    Config.from_env({"AUDIO_MODE": "null", key: value})
+        config = Config.from_env({"AUDIO_MODE": "null", "DLNA_BUFFER_MS": "0"})
+        command = receiver_commands(config, "test")["dlna"]
+        self.assertIn("--gstout-audiosink", command)
+        self.assertNotIn("--gstout-audiopipe", command)
+        buffered = receiver_commands(Config(dlna_buffer_ms=750), "test")["dlna"]
+        self.assertNotIn("--gstout-audiosink", buffered)
+        self.assertNotIn("min-threshold-time", buffered[-1])
+        self.assertIn("buffer-time=750000", buffered[-1])
+        self.assertNotIn("queue", buffered[-1])
+        self.assertNotIn("--gstout-buffer-duration", buffered)
+
+    def test_miplay_uses_persistent_identity_and_isolated_bus(self):
+        command = receiver_commands(Config(interface="eth0"), "stable-identity", "192.0.2.1")["miplay"]
+        self.assertIn("stable-identity", command)
+        self.assertIn("miplay_bus", command)
+        self.assertEqual(command[-4:], ["--interface", "eth0", "--address", "192.0.2.1"])
 
     def test_generated_configuration_has_no_automatic_hardware_routing(self):
         text = pulse_config(Config(audio_mode="null"))
-        self.assertEqual(text.count("load-module module-null-sink"), 5)
+        self.assertEqual(text.count("load-module module-null-sink"), 6)
         self.assertIn("set-default-sink discard", text)
         self.assertIn("set-sink-mute output yes", text)
         for forbidden in ("rescue-streams", "switch-on-connect", "module-loopback", "module-udev"):
@@ -280,7 +305,7 @@ class PulseTests(unittest.TestCase):
 
     def inventory(self, inputs):
         sinks = [{"index": i, "name": name} for i, name in enumerate(
-            ["airplay_bus", "dlna_bus", "spotify_bus", "discard", "output"])]
+            ["airplay_bus", "dlna_bus", "spotify_bus", "discard", "output", "miplay_bus"])]
         pulse = Pulse()
         pulse.listing = lambda kind: sinks if kind == "sinks" else inputs
         return pulse

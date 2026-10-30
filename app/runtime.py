@@ -24,7 +24,7 @@ import uuid
 from typing import Callable, Mapping
 
 LOG = logging.getLogger("lan-audio")
-SOURCES = ("airplay", "dlna", "spotify")  # First wins simultaneous activation.
+SOURCES = ("airplay", "dlna", "spotify", "miplay")  # First wins simultaneous activation.
 RUN_DIR = Path("/run/lan-audio")
 DATA_DIR = Path("/data")
 PULSE_SERVER = "unix:/run/lan-audio/pulse.sock"
@@ -49,6 +49,9 @@ class Config:
     dlna_port: int = 49494
     spotify_port: int = 24879
     avahi_mode: str = "internal"
+    miplay_port: int = 8899
+    dlna_buffer_ms: int = 1000
+    output_buffer_ms: int = 200
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Config:
@@ -91,11 +94,14 @@ class Config:
             "airplay": number("AIRPLAY_PORT", 7000, 1024, 65535),
             "dlna": number("DLNA_PORT", 49494, 49152, 65535),
             "spotify": number("SPOTIFY_PORT", 24879, 1024, 65535),
+            "miplay": number("MIPLAY_PORT", 8899, 1024, 65535),
         }
         if len({ports[source] for source in enabled}) != len(enabled):
             raise BridgeError("Enabled receiver ports must be distinct")
         return cls(name, mode, device, rate, number("OUTPUT_VOLUME", 70, 0, 100),
-                   tuple(enabled), interface, ports["airplay"], ports["dlna"], ports["spotify"], avahi_mode)
+                   tuple(enabled), interface, ports["airplay"], ports["dlna"], ports["spotify"], avahi_mode,
+                   ports["miplay"], number("DLNA_BUFFER_MS", 1000, 0, 5000),
+                   number("OUTPUT_BUFFER_MS", 200, 50, 1000))
 
 
 def atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
@@ -244,10 +250,18 @@ def receiver_commands(config: Config, identity: str, address: str = "") -> dict[
         "spotify": ["librespot", "--name", config.device_name, "--backend", "pulseaudio",
                     "--device", "spotify_bus", "--zeroconf-port", str(config.spotify_port),
                     "--cache", "/data/spotify", "--disable-audio-cache", "--initial-volume", "100", "--quiet"],
+        "miplay": ["python3", "/app/miplay_receiver.py", "--name", config.device_name,
+                   "--identity", identity, "--port", str(config.miplay_port), "--sink", "miplay_bus"],
     }
+    if config.dlna_buffer_ms:
+        # Buffer decoded PCM, not playbin's BUFFERING state machine: gmrender 0.3
+        # can otherwise resume after an explicit Pause when buffering reaches 100%.
+        commands["dlna"] = commands["dlna"][:-4] + ["--gstout-audiopipe",
+            f"pulsesink device=dlna_bus buffer-time={config.dlna_buffer_ms * 1000}"]
     if config.interface:
         commands["dlna"] += ["--interface-name", config.interface]
         commands["spotify"] += ["--zeroconf-interface", address]
+        commands["miplay"] += ["--interface", config.interface, "--address", address]
     return {name: commands[name] for name in config.enabled}
 
 
@@ -295,8 +309,9 @@ class Snapshot:
 
 
 class Pulse:
-    def __init__(self, runner: Callable = subprocess.run):
+    def __init__(self, runner: Callable = subprocess.run, latency_ms: int = 200):
         self.runner = runner
+        self.latency_ms = latency_ms
         self.route_module: int | None = None
 
     def command(self, *arguments: str) -> str:
@@ -364,7 +379,7 @@ class Pulse:
             raise BridgeError("Invalid routing transition")
         try:
             module = self.command("load-module", "module-loopback", f"source={source}_bus.monitor",
-                                  "sink=output", "latency_msec=100", "source_dont_move=true",
+                                  "sink=output", f"latency_msec={self.latency_ms}", "source_dont_move=true",
                                   "sink_dont_move=true", "channels=2", "remix=no")
             if not re.fullmatch(r"[0-9]+", module):
                 raise BridgeError("PulseAudio did not return a routing module identifier")
@@ -560,7 +575,7 @@ class Runtime:
         self.config = config
         self.stop = threading.Event()
         self.supervisor = Supervisor()
-        self.pulse = Pulse()
+        self.pulse = Pulse(latency_ms=config.output_buffer_ms)
         self.coordinator = Coordinator(self.pulse, self.supervisor.preempt, config.enabled)
         self.state = "starting"
         self.lock_file = None
@@ -572,6 +587,7 @@ class Runtime:
         status = {"schema": 1, "pid": os.getpid(), "heartbeat_unix": time.time(), "state": self.state,
                   "owner": self.coordinator.owner, "enabled": list(self.config.enabled),
                   "avahi_mode": self.config.avahi_mode,
+                  "buffers": {"dlna_ms": self.config.dlna_buffer_ms, "output_ms": self.config.output_buffer_ms},
                   "route_module": self.pulse.route_module, "children": self.supervisor.statuses()}
         atomic_write(STATUS_PATH, json.dumps(status, separators=(",", ":")) + "\n", 0o644)
 
