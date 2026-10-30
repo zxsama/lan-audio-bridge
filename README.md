@@ -16,7 +16,7 @@ PulseAudio → USB UAC 声卡 → 光纤 PCM → 音箱光纤输入
 
 USB 转光纤设备必须被 Linux 识别成 USB Audio Class（UAC）声卡，并实际支持目标采样率的双声道 PCM 输出。普通 USB 转接线、只供电 USB 口和只支持数字输入的设备不满足条件。先确认 USB 声卡，再选择音箱的光纤输入；本项目不依赖音箱内置网络模块，也不修改音箱固件。
 
-目标适配器是用户指定的[京像商品](https://item.jd.com/10231416559827.html)，选项“灰色 USB 转光纤母-24B”。商品页需要登录，本次未核验其 Linux/UAC 支持或音频规格；`24B` 仅按选项型号记录，不视为已确认 24 bit。默认 48 kHz 双声道是本方案的目标配置。真机连接后先查看 `/proc/asound/cardN/stream0` 的 Playback、Format、Channels、Rates，再核对实际 ALSA 设备和光纤输出；`probe-host.sh` 会只读打印这些能力信息。
+目标适配器是用户指定的[京像商品](https://item.jd.com/10231416559827.html)，选项“灰色 USB 转光纤母-24B”。商品页需要登录，规格未从页面核验。2026-10-30 在用户 NAS 上实测 USB AUDIO DAC 已被 Linux 识别，稳定 CARD 名为 `DAC`；0.1.2 的 Pulse 成功打开该设备，ALSA 当前参数为 S24_3LE、双声道、48000 Hz，见[设备验证记录](docs/verification-0.1.2.md)。光纤音箱实际出声及端到端 bit-perfect 尚未验收。其他设备部署前仍应查看 `/proc/asound/cardN/stream0` 的 Playback、Format、Channels、Rates；`probe-host.sh` 会只读打印这些能力信息。
 
 ## 能力与边界
 
