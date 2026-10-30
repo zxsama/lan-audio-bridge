@@ -89,6 +89,7 @@ RUN python3 -c 'import dbus, zeroconf; from vendor.castfabric_miplay.receiver im
     && gst-inspect-1.0 queue >/dev/null && ffmpeg -version >/dev/null
 COPY scripts/probe-host.sh scripts/status.sh /app/scripts/
 COPY docs/UPSTREAM.md /usr/local/share/doc/lan-audio-bridge/UPSTREAM.md
+COPY LICENSE THIRD_PARTY_NOTICES.md Dockerfile /usr/local/share/doc/lan-audio-bridge/
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \

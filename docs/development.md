@@ -19,6 +19,8 @@ compose.local.yaml    Windows/WSL 常驻软件演示
 
 `compose.yaml`、`compose.test.yaml`、`compose.local.yaml` 各自独立，不要互相合并。只有 `compose.host-avahi.yaml` 是明确用于与生产 `compose.yaml` 合并的 override；不能将它套到 bridge 网络测试或本机演示上。测试使用专用项目与数据卷，不应指向生产容器。
 
+Windows 本机演示使用 `scripts/local.ps1 Start / Status / Stop` 管理独立的 `compose.local.yaml` null 输出实例，操作步骤见[本机部署说明](local-deployment.md)。演示与测试实例分离，其状态不能替代手机局域网发现或 USB 光纤硬件验证。
+
 ## 单元测试
 
 在项目目录使用 Python 3.11 或更新版本：
@@ -31,24 +33,32 @@ python3 -B -m unittest discover -s tests -p test_runtime.py -v
 
 ## Docker 软件验证
 
-在 Linux/WSL 项目目录构建并运行独立测试实例：
+测试配置使用 bridge 网络、独立 Docker volume 和 null 输出，不映射 `/dev/snd`，不发布端口，也不会播放到真实声卡。在 Linux/WSL 项目目录构建并运行独立测试实例：
 
 ```sh
 docker build -t lan-audio-bridge:0.2.1 .
 docker compose -f compose.test.yaml config --quiet
 docker compose -f compose.test.yaml up -d --wait --wait-timeout 120
 python3 -B tests/integration.py
+python3 -B tests/pulse_startup.py
 python3 -B tests/recovery.py
 python3 -B tests/discovery.py
 python3 -B tests/airplay_sender.py
 docker compose -f compose.test.yaml down
 ```
 
-`integration.py` 检查真实 PulseAudio 音频隔离和 DLNA 播放；`recovery.py` 会终止测试接收进程及核心进程，检查恢复和持久身份；`discovery.py` 从独立容器检查 mDNS、SSDP 与连接接口。`airplay_sender.py` 在临时容器安装固定版本的发送端依赖，发送 RAOP/AirPlay 1 音频，需要网络下载。测试失败后先保留日志并检查测试容器；无论结果如何，都应停止测试实例。
+集成与恢复测试使用 Python 标准库和本地 Docker CLI：
+
+- `integration.py` 向真实 PulseAudio 四个输入总线注入不同频率音频，在 `output.monitor` 录音并检查唯一音源，再通过 DLNA SOAP 验证 HTTP WAV 播放、暂停、Seek 和停止。
+- `recovery.py` 主动终止测试接收进程和 Pulse 进程，检查监督重启、核心故障退出、容器重启后的持久身份与空闲状态，以及正常停止；仅针对独立 null 输出测试实例运行。
+- `discovery.py` 从独立容器检查 mDNS、SSDP 与公告端点。
+- `airplay_sender.py` 在临时容器下载固定版本发送端依赖，发送 RAOP/AirPlay 1 音频，完成后自动清理；不代表 AirPlay 2 传音通过，见 [AirPlay 发送测试](airplay-sender-validation.md)。
+
+测试失败后先保留日志并检查测试容器；无论结果如何，都应停止测试实例。
 
 最后的 `down` 保留测试卷以便诊断；确认不再需要测试状态后可加 `--volumes`。这只用于 `compose.test.yaml`，不删除本机演示或生产数据。
 
-软件验证不能代替 [真机验收](operations.md)。历史验证记录保留各自日期和镜像 ID；修改运行代码或依赖后，应重跑受影响的测试，而不是将旧记录当作新镜像的结果。
+软件验证证明容器内管线与恢复行为，不能证明 iPhone AirPlay 2、Spotify 账号、QQ 音乐 QPlay、NAS 多播或 USB 光纤硬件可用，也不能代替[真机验收](operations.md)。历史验证记录保留各自日期和镜像 ID；修改运行代码或依赖后，应重跑受影响的测试，而不是将旧记录当作新镜像的结果。
 
 ## 宿主 Avahi 模式验证
 
@@ -68,7 +78,7 @@ python3 -B tests/host_avahi.py --image lan-audio-bridge:0.2.1
 
 公开文档、配置示例和代码注释使用通用设备描述与明确标注的示例值，不包含私人采购链接、个人路径、实际网络地址、设备身份或对话记录。上游来源、许可证署名和协议常量应保持准确；验证记录应注明版本和证据范围。
 
-`.dockerignore` 使用白名单：构建只接收应用代码、两份容器内 shell 脚本、Dockerfile 和上游来源文档。Windows/WSL 管理程序、测试、交付归档和本机状态不会复制到运行镜像中。
+`.dockerignore` 使用白名单：构建只接收应用代码、两份容器内 shell 脚本、Dockerfile、项目许可证、第三方声明和上游来源文档。Windows/WSL 管理程序、测试、交付归档和本机状态不会复制到运行镜像中。
 
 ## 0.2.0 回归
 
