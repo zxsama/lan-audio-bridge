@@ -9,6 +9,8 @@
 
 本包 NQPTP 1.2.9 会绑定 UDP 319、320、9000；三个端口都应纳入冲突检查。发现冲突先确认占用服务的职责，不直接终止宿主服务。
 
+采用宿主 Avahi 模式时，本页所有 `docker compose` 操作均需加 `-f compose.yaml -f compose.host-avahi.yaml`，日志同时检查 `audio` 和 `discovery-proxy`。代理是否健康与手机是否能收到公告是两项检查；完整安装、权限边界和命令见[宿主 Avahi](host-avahi.md)。
+
 `OUTPUT_VOLUME` 默认 70%，首次接线先降低音箱物理音量。只有目标声卡被识别、容器健康且选中正确输入后，再用客户端低音量开始播放。输出统一为双声道 PCM，采样率默认 48 kHz；不承诺 bit-perfect、环绕编码或所有 UAC 设备的格式兼容性。
 
 ## 真机验收记录
@@ -27,6 +29,8 @@
 - [ ] 新来源停止后保持空闲；迟到的旧来源关闭事件不误停当前来源。
 - [ ] 同协议两台客户端的行为分别按 Shairport / gmrender / librespot 实现记录；不推断为跨协议协调器保证。
 - [ ] NAS 重启、容器重启和局域网短暂断线后的重新发现与播放。
+- [ ] 外部发现模式：音频服务重建及代理重启后重新注册 AirPlay/Spotify，实际客户端可发现和播放；代理不能调用其他宿主服务或 Avahi `SetHostName`。
+- [ ] 外部发现模式：在允许维护宿主发现服务的窗口验证宿主 Avahi 重启后重新注册与播放；不要为排查单个应用直接重启 NAS 发现服务。实验容器测试不能替代此项实机记录。
 - [ ] USB 拔出保持无输出、不改播到其他声卡；重插后如未恢复，重启容器验证恢复。
 - [ ] 播放至少一小时，检查断音、CPU、内存、日志轮转和 `/data` 增长。
 
@@ -35,10 +39,12 @@
 | 现象 | 定位与边界 |
 | --- | --- |
 | `.env` 校验失败 | 设置真实 `DATA_DIR` 和稳定 `AUDIO_DEVICE`；确认专用目录已存在。不要绕过必填保护改用宿主根目录。 |
-| 容器循环退出 | 检查日志、设备是否存在及 UDP 319/320/9000 冲突；先 `docker compose stop audio`，修正后 `up -d`，无需清空数据。 |
+| 容器循环退出 | 检查日志、设备是否存在及 UDP 319/320/9000 冲突；先 `docker compose stop audio`，修正后 `up -d`，无需清空数据。内部 Avahi 报 5353 占用时按下一行处理。 |
+| Avahi 报 5353 已占用、无可用网络协议 | 只读确认占用进程及宿主 Avahi/D-Bus 状态；若 NAS Avahi 独占端口，采用[宿主 Avahi override](host-avahi.md)，不停止宿主服务、不改其 `disallow-other-stacks`。 |
+| 外部模式代理不健康或 Avahi 不可达 | 检查宿主 `/run/dbus/system_bus_socket`、Avahi 服务、代理日志与组合后的挂载；只给代理原始宿主 socket。监督器会在周期探测失联后退出音频容器，单独 unhealthy 不会触发 Docker 重启。 |
 | unhealthy 但仍运行 | Docker 不自动重启 unhealthy 容器；检查日志和 status，必要时手动 `restart audio`。 |
 | 能发现但无声音 | 查看 owner、路由、客户端 URL 可达性、ALSA 名称、输出音量和音箱光纤输入。发现与音频可用是两件事。 |
-| 发现不了设备 | 检查物理链路、客户端隔离、多播与接口选择；不要随意停用 NAS 自带发现服务。跨 VLAN 发现需要独立网络规划。 |
+| 发现不了设备 | 检查物理链路、客户端隔离、多播与接口选择；外部模式还受宿主 Avahi 接口允许/拒绝策略影响，`NETWORK_INTERFACE` 不会改变它。不要随意停用 NAS 自带发现服务。跨 VLAN 发现需要独立网络规划。 |
 | USB 拔出或格式不支持 | 不自动回退其他声卡；恢复设备后重启服务。如 ALSA 名称变化则重新探测并改配置。容器 /dev/snd 设备映射在热插拔后也可能需要重新创建。 |
 | 旧手机反复重新接管 | 客户端在主动重新连接或播放；先在旧手机结束会话。协调器不能保证远程客户端不重试。 |
 | 需要立即释放播放 | 停止客户端，再重启本服务；没有单独 release API，不用手动 pactl 删除模块伪装正常状态。 |
@@ -48,12 +54,14 @@
 停止服务后用 TrueNAS 数据集快照或自己认可的备份方式备份专用 `/data`，保留 `.env`、Compose 和旧镜像。新镜像先在 `compose.test.yaml` 验证，再安排实际声卡验收。生产切换会中断会话。
 
 ```sh
-docker image tag lan-audio-bridge:0.1.0 lan-audio-bridge:rollback
+docker image tag lan-audio-bridge:0.1.1 lan-audio-bridge:rollback
 docker compose stop audio
 # 构建/导入并验证更新镜像后：
 docker compose up -d --force-recreate
 ```
 
 需要回退时停止服务，将保留的镜像恢复原标签，再重新创建容器。若上游修改了缓存格式，使用停机前的数据快照；不要无依据清空全部缓存。CLI 命令适用于 CLI 部署，TrueNAS UI 管理的实例在 UI 中执行相应停止/重新部署动作。
+
+外部模式升级或回退须同时核对 `audio` 与 `discovery-proxy` 的镜像和合并后的 YAML；不要将不支持 `AVAHI_MODE=external` 的旧镜像直接套用该 override。代理卷只保存运行 socket，不替代 `/data` 备份。升级后重新执行代理隔离、重连及客户端发现/播放验收。
 
 `docker compose down` 删除容器和网络，生产 `/data` 绑定目录不会删除。不要用广泛的 Docker prune 或删除 NAS 数据集来处理单个服务故障。镜像构建失败、第三方云服务变化、手机私有协议变化和硬件不兼容均不能靠增加容器权限保证恢复。

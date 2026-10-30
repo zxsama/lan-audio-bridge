@@ -2,7 +2,7 @@
 name: lan-audio-bridge-test
 services:
   audio:
-    image: lan-audio-bridge:0.1.0
+    image: lan-audio-bridge:0.1.1
     pull_policy: never
     init: true
     restart: 'no'

@@ -1,7 +1,7 @@
 name: lan-audio-bridge
 services:
   audio:
-    image: lan-audio-bridge:0.1.0
+    image: lan-audio-bridge:0.1.1
     pull_policy: never
     network_mode: host
     init: true

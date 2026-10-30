@@ -47,6 +47,7 @@ class Config:
     airplay_port: int = 7000
     dlna_port: int = 49494
     spotify_port: int = 24879
+    avahi_mode: str = "internal"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Config:
@@ -71,6 +72,9 @@ class Config:
         mode = env.get("AUDIO_MODE", "alsa")
         if mode not in ("alsa", "null"):
             raise BridgeError("AUDIO_MODE must be alsa or null")
+        avahi_mode = env.get("AVAHI_MODE", "internal")
+        if avahi_mode not in ("internal", "external"):
+            raise BridgeError("AVAHI_MODE must be internal or external")
         device = env.get("AUDIO_DEVICE", "")
         if device or mode == "alsa":
             match = re.fullmatch(r"(?:plug)?hw:CARD=([A-Za-z0-9_-]{1,31}),DEV=([0-9]{1,3})(?:,SUBDEV=[0-9]{1,3})?", device)
@@ -90,7 +94,7 @@ class Config:
         if len({ports[source] for source in enabled}) != len(enabled):
             raise BridgeError("Enabled receiver ports must be distinct")
         return cls(name, mode, device, rate, number("OUTPUT_VOLUME", 70, 0, 100),
-                   tuple(enabled), interface, ports["airplay"], ports["dlna"], ports["spotify"])
+                   tuple(enabled), interface, ports["airplay"], ports["dlna"], ports["spotify"], avahi_mode)
 
 
 def atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
@@ -216,6 +220,18 @@ def avahi_config(config: Config) -> str:
     lines += ["[wide-area]", "enable-wide-area=no", "[publish]", "publish-addresses=yes",
               "publish-hinfo=no", "publish-workstation=no", "[reflector]", "enable-reflector=no"]
     return "\n".join(lines) + "\n"
+
+
+def avahi_available(address: str = "unix:path=/run/dbus/system_bus_socket") -> bool:
+    """Probe the configured bus without logging identities or D-Bus responses."""
+    try:
+        result = subprocess.run(
+            ["dbus-send", "--bus=" + address, "--print-reply", "--reply-timeout=1500",
+             "--dest=org.freedesktop.Avahi", "/", "org.freedesktop.Avahi.Server.GetVersionString"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def receiver_commands(config: Config, identity: str, address: str = "") -> dict[str, list[str]]:
@@ -515,10 +531,12 @@ class Runtime:
         self.state = "starting"
         self.lock_file = None
         self.lock_acquired = False
+        self.next_avahi_probe = 0.0
 
     def write_status(self) -> None:
         status = {"schema": 1, "pid": os.getpid(), "heartbeat_unix": time.time(), "state": self.state,
                   "owner": self.coordinator.owner, "enabled": list(self.config.enabled),
+                  "avahi_mode": self.config.avahi_mode,
                   "route_module": self.pulse.route_module, "children": self.supervisor.statuses()}
         atomic_write(STATUS_PATH, json.dumps(status, separators=(",", ":")) + "\n", 0o644)
 
@@ -536,7 +554,10 @@ class Runtime:
         pulse_user = pwd.getpwnam("pulse")
         os.chown(RUN_DIR, pulse_user.pw_uid, pulse_user.pw_gid)
         os.chmod(RUN_DIR, 0o755)
-        for directory in (Path("/run/dbus"), Path("/run/avahi-daemon"), Path("/run/pulse")):
+        directories = [Path("/run/pulse")]
+        if self.config.avahi_mode == "internal":
+            directories += [Path("/run/dbus"), Path("/run/avahi-daemon")]
+        for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
             os.chmod(directory, 0o755)
         os.chown("/run/pulse", pulse_user.pw_uid, pulse_user.pw_gid)
@@ -550,9 +571,11 @@ class Runtime:
         atomic_write(RUN_DIR / "machine-id", persistent_machine_id(DATA_DIR) + "\n", 0o644)
         address = interface_ipv4(self.config.interface) if self.config.interface else ""
         # These paths are ephemeral and are only removed after the single-instance lock.
-        for path in (RUN_DIR / "pulse.sock", Path("/run/pulse/pid"),
-                     Path("/run/dbus/system_bus_socket"), Path("/run/avahi-daemon/pid"),
-                     Path("/run/avahi-daemon/socket")):
+        paths = [RUN_DIR / "pulse.sock", Path("/run/pulse/pid")]
+        if self.config.avahi_mode == "internal":
+            paths += [Path("/run/dbus/system_bus_socket"), Path("/run/avahi-daemon/pid"),
+                      Path("/run/avahi-daemon/socket")]
+        for path in paths:
             path.unlink(missing_ok=True)
         atomic_write(RUN_DIR / "pulse.pa", pulse_config(self.config), 0o644)
         atomic_write(RUN_DIR / "shairport.conf", shairport_config(self.config, address), 0o600)
@@ -560,7 +583,8 @@ class Runtime:
         self.commands = receiver_commands(self.config, identity, address)
         self.write_status()
 
-    def wait_ready(self, probe: Callable[[], bool], timeout: float = 12) -> None:
+    def wait_ready(self, probe: Callable[[], bool], timeout: float = 12,
+                   failure: str = "Core service readiness timed out") -> None:
         until = time.monotonic() + timeout
         while not self.stop.is_set() and time.monotonic() < until:
             self.supervisor.tick(time.monotonic())
@@ -573,15 +597,25 @@ class Runtime:
             self.stop.wait(0.1)
         if self.stop.is_set():
             raise InterruptedError()
-        raise BridgeError("Core service readiness timed out")
+        raise BridgeError(failure)
+
+    def check_discovery(self, now: float) -> None:
+        if self.config.avahi_mode == "external" and now >= self.next_avahi_probe:
+            self.next_avahi_probe = now + 5
+            if not avahi_available():
+                raise BridgeError("External Avahi unavailable; check the discovery proxy and host Avahi")
 
     def start(self) -> None:
-        self.supervisor.add("dbus", ["dbus-daemon", "--system", "--nofork", "--nopidfile",
-                                     "--address=unix:path=/run/dbus/system_bus_socket"], core=True)
-        self.wait_ready(lambda: Path("/run/dbus/system_bus_socket").exists())
-        self.supervisor.add("avahi", ["avahi-daemon", "--no-drop-root", "--no-chroot", "--no-rlimits",
-                                      "--file=/run/lan-audio/avahi.conf"], core=True)
-        self.wait_ready(lambda: Path("/run/avahi-daemon/socket").exists())
+        if self.config.avahi_mode == "external":
+            self.wait_ready(avahi_available, failure="External Avahi unavailable; mount the filtered D-Bus socket and check host Avahi")
+            self.next_avahi_probe = time.monotonic() + 5
+        else:
+            self.supervisor.add("dbus", ["dbus-daemon", "--system", "--nofork", "--nopidfile",
+                                         "--address=unix:path=/run/dbus/system_bus_socket"], core=True)
+            self.wait_ready(lambda: Path("/run/dbus/system_bus_socket").exists())
+            self.supervisor.add("avahi", ["avahi-daemon", "--no-drop-root", "--no-chroot", "--no-rlimits",
+                                          "--file=/run/lan-audio/avahi.conf"], core=True)
+            self.wait_ready(lambda: Path("/run/avahi-daemon/socket").exists())
         self.supervisor.add("pulse", ["pulseaudio", "--system", "--daemonize=no", "--disallow-exit",
                                       "--exit-idle-time=-1", "--use-pid-file=no", "--log-target=stderr",
                                       "--log-level=notice", "--realtime=no", "--high-priority=no",
@@ -608,6 +642,7 @@ class Runtime:
             while not self.stop.is_set():
                 begin = time.monotonic()
                 self.supervisor.tick(begin)
+                self.check_discovery(begin)
                 self.coordinator.step(self.pulse.snapshot(), self.supervisor.blocked_sources())
                 self.state = "playing" if self.coordinator.owner else "idle"
                 self.write_status()

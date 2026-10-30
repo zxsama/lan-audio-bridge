@@ -11,12 +11,13 @@ tests/                单元测试、音频集成、恢复、发现与 RAOP 发�
 docs/                 设计、运行约定、部署运维和历史验证记录
 Dockerfile            固定上游版本的多阶段镜像构建
 compose.yaml          NAS 实际声卡部署
+compose.host-avahi.yaml 生产配置专用的宿主 Avahi override
 compose.test.yaml     隔离的 null 输出测试实例
 compose.local.yaml    Windows/WSL 常驻软件演示
 .env.example          生产配置模板，不含真实目录和设备标识
 ```
 
-三个 Compose 文件各自独立，不要使用多个 `-f` 将它们合并。测试使用专用项目与数据卷，不应指向生产容器。
+`compose.yaml`、`compose.test.yaml`、`compose.local.yaml` 各自独立，不要互相合并。只有 `compose.host-avahi.yaml` 是明确用于与生产 `compose.yaml` 合并的 override；不能将它套到 bridge 网络测试或本机演示上。测试使用专用项目与数据卷，不应指向生产容器。
 
 ## 单元测试
 
@@ -33,7 +34,7 @@ python3 -B -m unittest discover -s tests -p test_runtime.py -v
 在 Linux/WSL 项目目录构建并运行独立测试实例：
 
 ```sh
-docker build -t lan-audio-bridge:0.1.0 .
+docker build -t lan-audio-bridge:0.1.1 .
 docker compose -f compose.test.yaml config --quiet
 docker compose -f compose.test.yaml up -d --wait --wait-timeout 120
 python3 -B tests/integration.py
@@ -48,6 +49,18 @@ docker compose -f compose.test.yaml down
 最后的 `down` 保留测试卷以便诊断；确认不再需要测试状态后可加 `--volumes`。这只用于 `compose.test.yaml`，不删除本机演示或生产数据。
 
 软件验证不能代替 [真机验收](operations.md)。历史验证记录保留各自日期和镜像 ID；修改运行代码或依赖后，应重跑受影响的测试，而不是将旧记录当作新镜像的结果。
+
+## 宿主 Avahi 模式验证
+
+构建当前镜像后，可独立执行：
+
+```sh
+python3 -B tests/host_avahi.py --image lan-audio-bridge:0.1.1
+```
+
+该脚本在临时 Docker 网络命名空间中模拟独占 5353 的 Avahi、私有 D-Bus 和独立过滤代理，使用独立资源前缀并清理测试资源；不使用真实 host network、宿主 D-Bus、声卡、账号或发布端口。应检查代理访问限制、动态服务公告与失联恢复的实际输出。本节提供运行方法，不代表本轮脚本已通过；执行结果应单独记录。
+
+通过隔离测试仍不能确认真实 NAS 的 D-Bus 策略、接口允许列表、手机发现或播放。宿主 Avahi 重启和代理重启后的重新公告也需按[外部发现验收](host-avahi.md)分别记录，不能套用旧内部 Avahi 测试结果。
 
 ## 本地文件与镜像范围
 

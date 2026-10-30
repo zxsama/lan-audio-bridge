@@ -14,6 +14,8 @@ from runtime import (BridgeError, Child, Config, Coordinator, Pulse, Runtime, SO
                      Snapshot, Supervisor, atomic_write, avahi_config, child_environment,
                      owns_udp_ports, persistent_machine_id, persistent_uuid, pulse_config, receiver_commands, shairport_config)
 from healthcheck import healthy
+import healthcheck
+from runtime import avahi_available
 
 
 def snapshot(active=None, corked=None):
@@ -135,6 +137,13 @@ class CoordinatorTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_discovery_mode_is_explicit_and_validated(self):
+        self.assertEqual(Config.from_env({"AUDIO_MODE": "null"}).avahi_mode, "internal")
+        self.assertEqual(Config.from_env({"AUDIO_MODE": "null", "AVAHI_MODE": "external"}).avahi_mode, "external")
+        for mode in ("auto", "", "external\n"):
+            with self.subTest(mode=mode), self.assertRaises(BridgeError):
+                Config.from_env({"AUDIO_MODE": "null", "AVAHI_MODE": mode})
+
     def test_defaults_require_hardware_device(self):
         with self.assertRaises(BridgeError):
             Config.from_env({})
@@ -396,6 +405,26 @@ class HealthTests(unittest.TestCase):
     def test_idle_is_healthy_without_output_route(self):
         self.assertTrue(healthy(self.status(), 101, lambda pid: None))
 
+    def test_external_discovery_does_not_require_private_daemons(self):
+        status = self.status()
+        status["avahi_mode"] = "external"
+        del status["children"]["dbus"]
+        del status["children"]["avahi"]
+        self.assertTrue(healthy(status, 101, lambda pid: None))
+        for mode in ("internal", "unknown"):
+            status["avahi_mode"] = mode
+            self.assertFalse(healthy(status, 101, lambda pid: None))
+
+    def test_external_health_requires_responsive_host_discovery(self):
+        status = self.status()
+        status["avahi_mode"] = "external"
+        with patch.object(Path, "read_text", return_value=json.dumps(status)), \
+             patch.object(healthcheck, "healthy", return_value=True), \
+             patch.object(healthcheck, "avahi_available", return_value=False), \
+             patch.object(healthcheck.subprocess, "run") as pulse_probe:
+            self.assertEqual(healthcheck.main(), 1)
+            pulse_probe.assert_not_called()
+
     def test_stale_or_future_heartbeat_fails(self):
         for now in (99, 111):
             self.assertFalse(healthy(self.status(), now, lambda pid: None))
@@ -415,6 +444,38 @@ class HealthTests(unittest.TestCase):
 
 
 class ReadinessTests(unittest.TestCase):
+    def test_external_start_never_launches_a_second_mdns_stack(self):
+        runtime = Runtime(Config(audio_mode="null", avahi_mode="external", enabled=()))
+        runtime.commands = {}
+        with patch.object(runtime.supervisor, "add") as add, \
+             patch.object(runtime, "wait_ready") as wait, \
+             patch.object(runtime.pulse, "clear"):
+            runtime.start()
+        self.assertEqual([call.args[0] for call in add.call_args_list], ["pulse"])
+        self.assertIs(wait.call_args_list[0].args[0], avahi_available)
+
+    def test_external_discovery_failure_exits_instead_of_false_healthy(self):
+        runtime = Runtime(Config(audio_mode="null", avahi_mode="external"))
+        with patch("runtime.avahi_available", return_value=True) as probe:
+            runtime.check_discovery(10)
+            runtime.check_discovery(11)
+            self.assertEqual(probe.call_count, 1)
+        with patch("runtime.avahi_available", return_value=False), self.assertRaisesRegex(BridgeError, "External Avahi"):
+            runtime.check_discovery(15)
+
+    def test_internal_discovery_uses_its_supervised_processes(self):
+        runtime = Runtime(Config(audio_mode="null"))
+        with patch("runtime.avahi_available") as probe:
+            runtime.check_discovery(10)
+            probe.assert_not_called()
+
+    def test_discovery_probe_handles_unavailable_bus_without_exposing_reply(self):
+        for result in (FileNotFoundError(), subprocess.TimeoutExpired("dbus-send", 2)):
+            with self.subTest(error=type(result).__name__), patch("runtime.subprocess.run", side_effect=result):
+                self.assertFalse(avahi_available())
+        with patch("runtime.subprocess.run", return_value=subprocess.CompletedProcess([], 1)):
+            self.assertFalse(avahi_available())
+
     def test_nqptp_readiness_requires_its_own_socket_inodes(self):
         table = "header\n" + "\n".join(
             f"0: 00000000:{port:04X} 00000000:0000 07 0 0 0 0 0 {inode}"

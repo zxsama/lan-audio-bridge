@@ -1,0 +1,46 @@
+# Optional override for a Linux NAS already running Avahi:
+# docker compose -f compose.yaml -f compose.host-avahi.yaml up -d
+services:
+  audio:
+    environment:
+      AVAHI_MODE: external
+    depends_on:
+      discovery-proxy:
+        condition: service_healthy
+    volumes:
+      - avahi-bus:/run/dbus:ro
+
+  discovery-proxy:
+    image: lan-audio-bridge:0.1.1
+    pull_policy: never
+    network_mode: none
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: [python3, /app/avahi_proxy.py]
+    command: []
+    volumes:
+      - type: bind
+        source: /run/dbus
+        target: /run/host-dbus
+        read_only: true
+        bind:
+          create_host_path: false
+      - avahi-bus:/proxy
+    healthcheck:
+      test: [CMD, python3, /app/avahi_proxy.py, --check]
+      interval: 5s
+      timeout: 4s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: '2'
+
+volumes:
+  avahi-bus:

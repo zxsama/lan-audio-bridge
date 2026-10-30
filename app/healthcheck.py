@@ -7,6 +7,8 @@ import subprocess
 import sys
 import time
 
+from runtime import avahi_available
+
 
 def healthy(status: dict, now: float, alive=None) -> bool:
     alive = alive or (lambda pid: os.kill(pid, 0))
@@ -18,7 +20,12 @@ def healthy(status: dict, now: float, alive=None) -> bool:
             return False
         alive(status["pid"])
         children = status["children"]
-        required = {"pulse", "dbus", "avahi", *status["enabled"]}
+        mode = status.get("avahi_mode", "internal")
+        if mode not in ("internal", "external"):
+            return False
+        required = {"pulse", *status["enabled"]}
+        if mode == "internal":
+            required.update(("dbus", "avahi"))
         if "airplay" in status["enabled"]:
             required.add("nqptp")
         for name in required:
@@ -37,6 +44,8 @@ def main() -> int:
     try:
         status = json.loads(Path("/run/lan-audio/status.json").read_text(encoding="utf-8"))
         if not healthy(status, time.time()):
+            return 1
+        if status.get("avahi_mode") == "external" and not avahi_available():
             return 1
         # A recently updated status alone cannot prove the Pulse server responds.
         result = subprocess.run(["pactl", "--server=unix:/run/lan-audio/pulse.sock", "info"],

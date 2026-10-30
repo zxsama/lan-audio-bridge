@@ -77,6 +77,10 @@ RUN shairport-sync -V | tee /tmp/shairport-version \
     && rm -f /tmp/shairport-version /tmp/librespot-backends
 
 FROM base AS final
+RUN apt-get update && apt-get install -y --no-install-recommends xdg-dbus-proxy \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' xdg-dbus-proxy)" ge '0.1.6-1+deb13u3' \
+    && dpkg-query -W > /usr/local/share/doc/lan-audio-bridge/debian-packages.txt \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY app/ /app/
 COPY scripts/probe-host.sh scripts/status.sh /app/scripts/
