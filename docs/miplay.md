@@ -4,7 +4,7 @@
 
 ```text
 小米手机 → MiPlay 控制/WFD RTSP → AAC 解码 → 48kHz 双声道 PCM
-         → miplay_bus → 音源协调 → PulseAudio → USB 声卡 → 光纤
+         → miplay_bus → 音源协调 → PulseAudio → ALSA 播放设备
 ```
 
 ## 列表稳定性和空闲显示
@@ -66,4 +66,4 @@ python3 tests/host_avahi.py --image lan-audio-bridge:0.2.1
 docker compose -f compose.test.yaml down
 ```
 
-TrueNAS 部署按既有 CLI 或 Apps 管理方式更新，避免同时运行两份实例。手机列表出现、选中播放、暂停恢复、断开重连，以及 USB 光纤实际听音须在目标部署环境中单独验收；隔离软件测试不覆盖这些结果。
+TrueNAS 部署按既有 CLI 或 Apps 管理方式更新，避免同时运行两份实例。手机列表出现、选中播放、暂停恢复、断开重连，以及实际音频输出须在目标部署环境中单独验收；隔离软件测试不覆盖这些结果。

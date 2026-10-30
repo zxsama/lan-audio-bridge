@@ -70,6 +70,6 @@ Avahi 的动态对象位于 `/ClientN/EntryGroupN` 等路径，规则不固定�
 - NAS 上两个容器健康、`audio` 无内部 D-Bus/Avahi，客户端能发现并连接 AirPlay/Spotify；启用 MiPlay 时按其兼容范围单独验收；DLNA 仍按原路径验收。
 - 重建音频容器、重启代理后，重新注册、手机重新发现及实际播放均恢复。CLI 部署可在允许中断播放时用组合命令 `restart discovery-proxy`；GUI 部署使用对应管理入口。
 - 宿主 Avahi 重启后重新公告与播放恢复，只在允许维护宿主发现服务的窗口验收；不要为本项目调试擅自停启它。隔离测试通过不能代替真实 NAS 的此项记录。
-- 真实 AirPlay 2 手机传音、Spotify 账号播放、跨协议切换及 USB 光纤出声，按[运维文档](operations.md)单独验收。
+- 真实 AirPlay 2 手机传音、Spotify 账号播放、跨协议切换及 实际音频输出，按[运维文档](operations.md)单独验收。
 
 本文提供配置与验收方法，不宣称上述真实 NAS 场景已通过。更新镜像、代理规则或 TrueNAS 后，应重跑受影响项目。排查时保留必要日志并脱敏，不清空 `/data`、不扩大宿主 D-Bus 权限，也不修改 NAS 全局 Avahi 配置。

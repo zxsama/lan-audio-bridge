@@ -1,6 +1,6 @@
 # LAN Audio Bridge
 
-基于 Docker 的局域网音频接收器，支持 AirPlay、DLNA、Spotify Connect 和实验性小米妙播，通过 USB 声卡或 USB 转光纤设备输出音频。
+基于 Docker 的局域网音频接收器，支持 AirPlay、DLNA、Spotify Connect 和实验性小米妙播。
 
 ## 功能
 
@@ -15,7 +15,7 @@
 
 ## 部署
 
-需要 Linux amd64、Docker Compose、可用的 ALSA 播放设备，以及可传递局域网多播的网络。USB 转光纤设备须支持 USB Audio Class 和双声道 PCM。
+需要 Linux amd64、Docker Compose、可用的 ALSA 播放设备，以及可传递局域网多播的网络。
 
 ```sh
 git clone https://github.com/zxsama/lan-audio-bridge.git
@@ -28,7 +28,7 @@ cp .env.example .env
 
 ```dotenv
 DATA_DIR=/mnt/pool/apps/lan-audio-bridge/data
-AUDIO_DEVICE=plughw:CARD=YourUSB,DEV=0
+AUDIO_DEVICE=plughw:CARD=YourCard,DEV=0
 ```
 
 宿主未运行 Avahi 时：

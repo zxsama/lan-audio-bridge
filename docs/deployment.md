@@ -9,7 +9,7 @@
 在实际 NAS 主机执行 `sh scripts/probe-host.sh`。脚本只列出 USB、ALSA、网络和相关端口，不安装软件、不播放测试音、不更改系统服务。检查：
 
 1. `/dev/snd` 存在，`aplay -L` 能找到目标声卡。
-2. 选择稳定标识，例如 `plughw:CARD=YourUSB,DEV=0`，将 `YourUSB` 换成真实 CARD 名；不使用 `hw:1,0` 等会随重启变化的数字索引。
+2. 选择稳定标识，例如 `plughw:CARD=YourCard,DEV=0`，将 `YourCard` 换成真实 CARD 名；不使用 `hw:1,0` 等会随重启变化的数字索引。
 3. 手机与 NAS 在可相互访问的局域网，网络没有客户端隔离；SSDP/mDNS 多播可达。
 4. UDP 319/320 没有其他 PTP 服务占用，NQPTP 使用的 UDP 9000 与接收端控制端口未冲突。UDP 5353/1900 的共享监听需按实际服务调查，不要直接停掉宿主服务。
 
@@ -30,10 +30,10 @@ cp .env.example .env
 
 ```dotenv
 DATA_DIR=/mnt/pool/apps/lan-audio-bridge/data
-AUDIO_DEVICE=plughw:CARD=YourUSB,DEV=0
+AUDIO_DEVICE=plughw:CARD=YourCard,DEV=0
 ```
 
-路径和 `YourUSB` 均为示例，须替换为实际值。部署前创建并确认专用数据目录，用于保存设备身份、Spotify 缓存及授权状态。Compose 使用必填变量与 `create_host_path: false`，路径缺失时拒绝启动。不要将共享资料目录或数据池根目录挂载为 `/data`。
+路径和 `YourCard` 均为示例，须替换为实际值。部署前创建并确认专用数据目录，用于保存设备身份、Spotify 缓存及授权状态。Compose 使用必填变量与 `create_host_path: false`，路径缺失时拒绝启动。不要将共享资料目录或数据池根目录挂载为 `/data`。
 
 可选参数也有严格校验：`DEVICE_NAME` 最多 50 个 UTF-8 字节，只接受字母、数字、空格及 `._-()`；`NETWORK_INTERFACE` 如果指定，必须在容器内存在且带 IPv4 地址。`SAMPLE_RATE` 只接受 44100、48000、88200、96000、176400、192000，实际还需声卡支持；`OUTPUT_VOLUME` 为 0–100。四个 `ENABLE_*` 可分别设为 `false`，关闭对应接收器。
 

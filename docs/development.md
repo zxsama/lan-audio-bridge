@@ -19,7 +19,7 @@ compose.local.yaml    Windows/WSL 常驻软件演示
 
 `compose.yaml`、`compose.test.yaml`、`compose.local.yaml` 各自独立，不要互相合并。只有 `compose.host-avahi.yaml` 是明确用于与生产 `compose.yaml` 合并的 override；不能将它套到 bridge 网络测试或本机演示上。测试使用专用项目与数据卷，不应指向生产容器。
 
-Windows 本机演示使用 `scripts/local.ps1 Start / Status / Stop` 管理独立的 `compose.local.yaml` null 输出实例，操作步骤见[本机部署说明](local-deployment.md)。演示与测试实例分离，其状态不能替代手机局域网发现或 USB 光纤硬件验证。
+Windows 本机演示使用 `scripts/local.ps1 Start / Status / Stop` 管理独立的 `compose.local.yaml` null 输出实例，操作步骤见[本机部署说明](local-deployment.md)。演示与测试实例分离，其状态不能替代手机局域网发现或 物理音频输出验证。
 
 ## 单元测试
 
@@ -58,7 +58,7 @@ docker compose -f compose.test.yaml down
 
 最后的 `down` 保留测试卷以便诊断；确认不再需要测试状态后可加 `--volumes`。这只用于 `compose.test.yaml`，不删除本机演示或生产数据。
 
-软件验证证明容器内管线与恢复行为，不能证明 iPhone AirPlay 2、Spotify 账号、QQ 音乐 QPlay、NAS 多播或 USB 光纤硬件可用，也不能代替[真机验收](operations.md)。历史验证记录保留各自日期和镜像 ID；修改运行代码或依赖后，应重跑受影响的测试，而不是将旧记录当作新镜像的结果。
+软件验证证明容器内管线与恢复行为，不能证明 iPhone AirPlay 2、Spotify 账号、QQ 音乐 QPlay、NAS 多播或 实际音频输出可用，也不能代替[真机验收](operations.md)。历史验证记录保留各自日期和镜像 ID；修改运行代码或依赖后，应重跑受影响的测试，而不是将旧记录当作新镜像的结果。
 
 ## 宿主 Avahi 模式验证
 

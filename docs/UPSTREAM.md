@@ -53,7 +53,7 @@ docker build --target base -t lan-audio-bridge:base .
 docker build -t lan-audio-bridge:local .
 ```
 
-These checks establish binary and plugin availability. Phone discovery, sender playback, USB output and timing-port coexistence require the separate runtime and physical-device acceptance checks described in the main documentation.
+These checks establish binary and plugin availability. Phone discovery, sender playback, physical audio output and timing-port coexistence require the separate runtime and physical-device acceptance checks described in the main documentation.
 
 On 2026-10-28 the image was built successfully with Docker 28.1.1 on Linux amd64. The built binaries reported:
 

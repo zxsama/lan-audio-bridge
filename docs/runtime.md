@@ -2,7 +2,7 @@
 
 This document describes the container's runtime interface and routing invariants. For setup and validation commands, see [development.md](development.md) and the [README](../README.md).
 
-Target: TrueNAS SCALE, Linux amd64. Single locally built image, four independently enabled receivers (Shairport Sync, gmrender-resurrect, librespot, experimental MiPlay), PulseAudio owns the USB ALSA device. Apple Music and multiroom are out of scope. Do not require a web UI, Docker socket, or privileged mode.
+Target: Linux amd64 with Docker. Single locally built image, four independently enabled receivers (Shairport Sync, gmrender-resurrect, librespot, experimental MiPlay), PulseAudio owns the configured ALSA playback device. Apple Music and multiroom are out of scope. Do not require a web UI, Docker socket, or privileged mode.
 
 Runtime interface:
 - `python3 /app/runtime.py` is the container command; `python3 /app/healthcheck.py` is the Docker health check.
