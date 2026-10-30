@@ -1,8 +1,8 @@
 # 本地验证记录
 
-日期：2026-10-28。环境：Windows 主机的 WSL Ubuntu、Docker 28.1.1；测试服务使用独立 bridge 网络、null 输出，不映射 `/dev/snd`，没有操作 TrueNAS 或音箱。
+日期：2026-10-28。环境：Windows 主机的 WSL Ubuntu、Docker 28.1.1；测试服务使用独立 bridge 网络、null 输出，不映射 `/dev/snd`。结果不覆盖 TrueNAS 部署或物理音频输出。
 
-本轮集成使用镜像 `lan-audio-bridge:0.1.0`，当时 image ID 为 `sha256:37f77cc31e3b5f1205a4411d19131cb38d45661cb1416000104cb88aca0b7b3c`。最终导出镜像 ID 为 `sha256:7fc707edf4b2148245a0ad5a94cb6cd83ac07aa22e619531be6e986982e121c6`：后续仅补充了检查脚本的 UDP 9000 端口提示和构建来源文档，应用层与依赖不变。已逐文件比较最终镜像与通过测试容器内的 runtime.py、healthcheck.py SHA256，完全一致。以后修改运行代码或依赖并重建时，应重跑对应检查。
+集成验证使用镜像 `lan-audio-bridge:0.1.0`，测试镜像 ID 为 `sha256:37f77cc31e3b5f1205a4411d19131cb38d45661cb1416000104cb88aca0b7b3c`。最终导出镜像 ID 为 `sha256:7fc707edf4b2148245a0ad5a94cb6cd83ac07aa22e619531be6e986982e121c6`：后续仅补充了检查脚本的 UDP 9000 端口提示和构建来源文档，应用层与依赖不变。已逐文件比较最终镜像与通过测试容器内的 runtime.py、healthcheck.py SHA256，完全一致。修改运行代码或依赖并重建时，应重新执行对应检查。
 
 | 验证项 | 本地结果 |
 | --- | --- |
@@ -24,6 +24,6 @@
 
 测试脚本通过 stdin 在容器内执行，避免 Docker 向 tmpfs 复制文件在该 WSL 环境中表现不一致。WSL 在没有前台会话时可能自动退出；本地验证期间应保持一个 WSL 会话运行。NAS 的长期运行不由这个 WSL 行为推断。
 
-采样与路由检查发生在各次接管稳定后，证明这些片段只有一个数字音源；它不是对切换瞬间每一个采样、物理光纤波形或整段听感的测量。AirPlay 2 手机实际连接、Spotify Premium 授权播放、QQ 音乐 QPlay、NAS 多播发现、京像适配器 Linux/UAC/采样率以及音箱出声仍属于 [真机验收清单](operations.md)，本地结果不能替代。
+采样与路由检查发生在各次接管稳定后，证明这些片段只有一个数字音源；它不是对切换瞬间每一个采样、物理光纤波形或整段听感的测量。AirPlay 2 手机实际连接、Spotify Premium 授权播放、QQ 音乐 QPlay、NAS 多播发现、USB 音频适配器 Linux/UAC/采样率以及音箱出声仍属于 [真机验收清单](operations.md)，本地结果不能替代。
 
-核心进程故障恢复与持久身份检查由独立 `python3 tests/recovery.py` 执行；上述结果由主任务在同一 null 输出测试实例实跑通过。该测试会中断测试会话，不应针对生产硬件实例执行。
+核心进程故障恢复与持久身份检查由独立 `python3 tests/recovery.py` 执行；上述结果在同一 null 输出测试实例中通过。该测试会中断测试会话，不应针对生产硬件实例执行。

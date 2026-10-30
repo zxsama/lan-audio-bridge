@@ -18,11 +18,11 @@
 下面均需实际设备与账号，未勾选项不能由单元测试或 null sink 替代。记录 TrueNAS 版本、USB 设备型号/CARD、客户端系统/版本、网络接口和测试时间，不记录凭证。
 
 - [ ] NAS 启动后无需改设备索引即可识别同一 USB 声卡。
-- [ ] 京像“灰色 USB 转光纤母-24B”实机被识别为播放声卡；记录 `/proc/asound/cardN/stream0` 的格式、声道、采样率，确认 48 kHz 双声道 PCM。选项名不作为位深或兼容性的证据。
+- [ ] 目标 USB 音频适配器被识别为播放声卡；记录 `/proc/asound/cardN/stream0` 的格式、声道、采样率，确认支持所配置的双声道 PCM（默认 48 kHz）。商品描述不作为位深或兼容性的证据。
 - [ ] 低音量验证 USB → 光纤 → 音箱，左右声道与采样率正常。
 - [ ] iPhone 能发现 AirPlay 2 目标，实际连续播放、暂停、恢复和切换曲目。
 - [ ] 一个已知兼容的 DLNA 控制端能播放 NAS 可访问的媒体 URL，暂停、Seek、停止。
-- [ ] 用户实际 QQ 音乐版本能发现并播放到通用 renderer；若不支持，记录为 QPlay 不兼容，不修改上游宣称支持。
+- [ ] 目标 QQ 音乐版本能发现并播放到通用 renderer；若不支持，记录该客户端版本与通用 renderer 的兼容性限制。
 - [ ] Spotify Premium 客户端发现、授权、播放、暂停、恢复，重启后缓存状态正常。
 - [ ] AirPlay → DLNA、DLNA → AirPlay、AirPlay → Spotify、Spotify → AirPlay、DLNA → Spotify、Spotify → DLNA 六种切换；仅新来源出声。
 - [ ] 被接管的手机不必显示暂停，但没有旧来源悄悄混音或自动恢复；重新主动播放可以争取输出。

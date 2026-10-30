@@ -12,7 +12,7 @@
 ## 已通过的软件验证
 
 - 55 项标准库单元测试。
-- `tests/pulse_startup.py`：实际 Pulse UID、私有总线连通、目录权限、无 cookie 连接、动态模块加载/卸载、启动日志无本次报告的警告。
+- `tests/pulse_startup.py`：实际 Pulse UID、私有总线连通、目录权限、无 cookie 连接、动态模块加载/卸载、启动日志无系统模式、HOME、cookie 或 D-Bus 访问警告。
 - `tests/recovery.py`：实际 Pulse daemon 和会话包装进程分别退出后，监督器清理整个进程组；独立监督器测试在主容器持续运行时确认无残留。整应用退出、恢复、身份保留及 SIGTERM 正常结束均通过。
 - `tests/integration.py`：六种音源接管方向、唯一输出路由、录音频谱隔离、无旧流回退；真实 DLNA Play/Pause/Seek/Stop。
 - `tests/host_avahi.py`：external 模式上述启动验证、root-only 发现 socket、Pulse 用户访问被拒、发现与协议握手、代理及宿主 Avahi 故障恢复。fixture 宿主服务保持独立。
@@ -21,12 +21,12 @@
 
 ## TrueNAS 设备验证
 
-2026-10-30 15:00 UTC，经 TrueNAS `app.update` 更新既有应用成功。使用与本地测试相同的镜像 `sha256:c7e5cef5f341fb4ccdcb5415c144939404cf8f97e5441b3d5759c27c4f319972`，NAS 标签为 `lan-audio-bridge:truenas-0.1.2`。
+2026-10-30，在 TrueNAS 的 USB 声卡环境中完成应用更新与启动检查。验证镜像与隔离软件测试一致：`sha256:c7e5cef5f341fb4ccdcb5415c144939404cf8f97e5441b3d5759c27c4f319972`。以下仅记录该版本的硬件初始化结果。
 
 - 音频与发现代理两个容器均为 running / healthy，重启次数为 0，健康检查退出码为 0。
 - 实际 Pulse、会话包装进程、私有 dbus-daemon 均为 UID 101；音频设备附加组已生效。
-- 新容器启动日志只有 Pulse、NQPTP、AirPlay、DLNA、Spotify 启动记录，没有本次报告的系统模式、HOME、cookie 或 D-Bus 访问警告。五个子服务均运行，重启次数为 0。
-- `module-alsa-sink` 成功打开 `plughw:CARD=DAC,DEV=0`；Pulse 报告 `s24le 2ch 48000Hz`，宿主 ALSA `hw_params` 为 S24_3LE、2 声道、48000 Hz。
+- 新容器启动日志只有 Pulse、NQPTP、AirPlay、DLNA、Spotify 启动记录，没有系统模式、HOME、cookie 或 D-Bus 访问警告。五个子服务均运行，重启次数为 0。
+- `module-alsa-sink` 成功打开配置的 USB 声卡；Pulse 报告 `s24le 2ch 48000Hz`，宿主 ALSA `hw_params` 为 S24_3LE、2 声道、48000 Hz。
 - 验证时输出为 idle / mute、无活动音源；宿主 Avahi 进程 PID 与更新前一致。
 
 这确认真实 USB 声卡可被新运行身份打开，不代表音箱实际出声、手机传音或整条链路 bit-perfect 已验收。

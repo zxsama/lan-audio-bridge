@@ -4,7 +4,7 @@
 
 原问题是在 host network 下，宿主 Avahi 已占用 UDP 5353，音频容器内的第二个 Avahi 绑定失败，导致核心服务退出及反复重启。0.1.1 提供外部 Avahi 模式和独立 D-Bus 代理。
 
-## 本轮通过的检查
+## 已通过的检查
 
 - 53 项单元测试：包含外部模式配置、避免启动第二套发现服务、外部服务失联、健康检查和原有音频协调规则。
 - Docker 构建：安装 `xdg-dbus-proxy 0.1.6-1+deb13u3`，通过最低发行版修复版本检查。
@@ -16,7 +16,7 @@
 - 故障恢复：停止测试代理或测试 Avahi 后，audio 健康检查失败并非零退出；恢复代理/Avahi 并重启 audio 后，三协议发现和连接接口重新通过。测试使用 `restart=no` 观察退出，再显式重启；生产配置使用 `unless-stopped`。
 - audio 停止不终止模拟宿主的 D-Bus 或 Avahi；测试资源完成后清理。
 
-复现命令见 [开发文档](development.md) 和 [宿主 Avahi 部署说明](host-avahi.md)。本轮不重复将 RAOP/AirPlay 1 的历史验证当作新模式下的手机 AirPlay 2 验收，也不代表 Spotify 账号传音或 USB 光纤出声已经通过。
+复现命令见 [开发文档](development.md) 和 [宿主 Avahi 部署说明](host-avahi.md)。RAOP/AirPlay 1 的历史验证不构成新模式下的手机 AirPlay 2 验收，也不代表 Spotify 账号传音或 USB 光纤出声已经通过。
 
 ## NAS 应用更新要求
 

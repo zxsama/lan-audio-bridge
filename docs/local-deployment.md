@@ -17,7 +17,7 @@ Invoke-WebRequest -Uri 'http://127.0.0.1:49494/description.xml' -UseBasicParsing
 
 本机演示继续使用默认 `AVAHI_MODE=internal`。`compose.host-avahi.yaml` 只为实际 Linux NAS 的 host-network 生产配置提供外部发现，不适用于本页的 bridge 网络，也不要挂载 Windows/WSL 宿主 D-Bus 来替代本机演示配置。其隔离软件验证另见[开发文档](development.md)。
 
-只有 DLNA TCP 49494 发布到 WSL 的 `127.0.0.1:49494`。当前 Windows 可通过 WSL localhost 转发读取设备描述；这只是本机 HTTP 可达验证。没有发布 AirPlay/Spotify 端口，也没有为手机配置局域网广播、多播或访问入口。默认 WSL NAT 环境下，容器健康和 Windows 能读取描述均不证明手机发现、AirPlay 2、Spotify 授权或 QQ 音乐/QPlay 可用。手机和硬件验收仍按 [运维文档](operations.md) 在实际局域网及设备上完成。
+只有 DLNA TCP 49494 发布到 WSL 的 `127.0.0.1:49494`。启用 WSL localhost 转发后，可在 Windows 中检查设备描述接口；这只验证本机 HTTP 可达性。没有发布 AirPlay/Spotify 端口，也没有为手机配置局域网广播、多播或访问入口。默认 WSL NAT 环境下，容器健康和 Windows 能读取描述均不证明手机发现、AirPlay 2、Spotify 授权或 QQ 音乐/QPlay 可用。手机和硬件验收仍按 [运维文档](operations.md) 在实际局域网及设备上完成。
 
 ## WSL 生命周期
 

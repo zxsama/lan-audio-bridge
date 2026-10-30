@@ -1,12 +1,14 @@
-# LAN Audio Bridge 0.2.1
+# LAN Audio Bridge
 
-在 TrueNAS SCALE（Linux amd64）上部署 AirPlay、通用 DLNA renderer、Spotify Connect 和实验性小米妙播（MiPlay）接收器，共用一只 USB 声卡输出。每个协议使用独立接收进程，PulseAudio 独占指定 ALSA 设备；协调器只允许一个音源通往硬件。新开始播放的音源接管输出，旧接收进程会断开并重启，因此旧手机不保证显示“暂停”。这不是无缝切歌或多房间同步产品。
+LAN Audio Bridge 是面向 Linux amd64 和 TrueNAS SCALE 的容器化网络音频接收服务。项目集成 AirPlay、DLNA、Spotify Connect 和实验性 MiPlay 接收器，通过 PulseAudio 将活动音源输出到指定 ALSA 设备，适用于 USB 声卡或 USB 转 S/PDIF 音频设备。
 
-0.2.1 修复妙播列表探测连接被 15 秒握手期限误关闭的问题，并将无媒体状态从暂停改为 idle，避免空闲设备被误判为有一首无标题歌曲。独立探测连接会查询当前实际妙播会话的状态；不伪造歌名。见 [0.2.1 修复与验证](docs/verification-0.2.1.md)。
+当前版本：**0.2.1**。该版本修复 MiPlay 控制连接超时和空闲状态上报问题，详见[版本验证记录](docs/verification-0.2.1.md)。
 
-0.2.0 新增妙播接收通道，并将 DLNA 播放端 PCM 缓冲默认设为 1000ms，以增加短时网络停顿的余量；代价是起播/恢复可能稍慢。妙播复用已有 Avahi，不另占 UDP 5353。实现范围见[妙播与播放缓冲](docs/miplay.md)，测试结果见[0.2.0 软件验证](docs/verification-0.2.0.md)。真实手机/HyperOS 兼容性仍须实测；本轮没有部署或操作 TrueNAS。
+各协议使用独立接收进程和音频总线，协调器确保同一时间只有一个音源进入硬件输出。新音源接管时，旧接收器会断开并重启。项目不提供无缝切换或多房间同步。DLNA 默认使用 1000ms PCM 预缓冲，提高短时数据中断的容忍度，同时增加起播和恢复延迟。
 
-此前版本已通过容器内音频隔离、真实 DLNA 和 RAOP/AirPlay 1 软件验证，详见保留原版本信息的[验证记录](docs/local-validation-2026-10-29.md)。0.1.1 的宿主 Avahi 复用、代理隔离和故障恢复已通过隔离 Docker 测试，见[0.1.1 验证记录](docs/verification-0.1.1.md)。AirPlay 2 手机传音、Spotify 账号播放、QQ 音乐/网易云兼容性及 USB 光纤实际出声仍待实机验收。
+软件验证覆盖音源隔离、DLNA 控制、RAOP/AirPlay 1、MiPlay 模拟发送及故障恢复。目标手机、Spotify 账号、NAS 多播和 USB 光纤链路仍需按部署环境验收；各版本结果与限制见文末验证文档。
+
+## 音频路径
 
 ```text
 iPhone / DLNA 控制端 / Spotify Premium / 小米妙播
@@ -20,7 +22,7 @@ PulseAudio → USB UAC 声卡 → 光纤 PCM → 音箱光纤输入
 
 USB 转光纤设备必须被 Linux 识别成 USB Audio Class（UAC）声卡，并实际支持目标采样率的双声道 PCM 输出。普通 USB 转接线、只供电 USB 口和只支持数字输入的设备不满足条件。先确认 USB 声卡，再选择音箱的光纤输入；本项目不依赖音箱内置网络模块，也不修改音箱固件。
 
-目标适配器是用户指定的[京像商品](https://item.jd.com/10231416559827.html)，选项“灰色 USB 转光纤母-24B”。商品页需要登录，规格未从页面核验。2026-10-30 在用户 NAS 上实测 USB AUDIO DAC 已被 Linux 识别，稳定 CARD 名为 `DAC`；0.1.2 的 Pulse 成功打开该设备，ALSA 当前参数为 S24_3LE、双声道、48000 Hz，见[设备验证记录](docs/verification-0.1.2.md)。光纤音箱实际出声及端到端 bit-perfect 尚未验收。其他设备部署前仍应查看 `/proc/asound/cardN/stream0` 的 Playback、Format、Channels、Rates；`probe-host.sh` 会只读打印这些能力信息。
+项目不限定适配器品牌或商品型号。部署前可通过 `/proc/asound/cardN/stream0` 核对 Playback、Format、Channels 和 Rates；`probe-host.sh` 提供对应的只读能力检查。USB 设备识别成功不代表光纤链路、实际听音或端到端 bit-perfect 已验证。
 
 ## 能力与边界
 
@@ -28,14 +30,14 @@ USB 转光纤设备必须被 Linux 识别成 USB Audio Class（UAC）声卡，�
 | --- | --- |
 | AirPlay 2 | Shairport Sync + NQPTP；需局域网 mDNS 与 UDP 319/320 可用，本包 NQPTP 1.2.9 还绑定 UDP 9000。手机真实发现、播放与切换仍须实机验收。[上游说明](https://github.com/mikebrady/shairport-sync) |
 | DLNA | gmrender-resurrect 通用 UPnP AV renderer，支持链路以具体媒体 URL、格式和控制端为准。[上游项目](https://github.com/hzeller/gmrender-resurrect) |
-| QQ 音乐 / QPlay | 先验证应用是否愿意把媒体交给通用 renderer；通用 DLNA 通过不等于 QPlay 专有发现、认证或会员资源可用。本项目未实现 QPlay 专有协议，需用户版本真机验证。 |
+| QQ 音乐 / QPlay | 通用 DLNA 支持不等同于 QPlay 专有协议支持。本项目未实现 QPlay 专有发现或认证；客户端和资源兼容性须按实际版本验证。 |
 | Spotify Connect | librespot；需要 Spotify Premium，初始发现、授权及云端播放需要网络。[上游要求](https://github.com/librespot-org/librespot) |
 | 小米妙播 | 实验性 MiPlay 接收：mDNS/TCP 控制、WFD/RTSP、AAC 解码到 PCM，再写入隔离总线。不含 CoAP/旧版 5355 发现；不能保证所有 HyperOS 版本。见[范围与配置](docs/miplay.md)。 |
 | 音量 | `OUTPUT_VOLUME` 是共同输出的百分比；客户端音量还可能在各协议内衰减。不承诺各客户端音量显示同步。 |
-| 歌曲信息 | metadata 是标题、封面等附加信息，不是把音频送到音箱的输出协议；本版不提供统一封面/歌词界面。 |
-| Apple Music / 多房间 | 不纳入本次验收范围；不承诺相关平台、受保护内容或跨设备同步。 |
+| 歌曲信息 | 支持范围取决于接收协议；项目不提供统一封面或歌词界面。 |
+| Apple Music / 多房间 | Apple Music 和受保护内容不在已验证范围内；项目不提供跨设备同步。 |
 
-## 部署前只读检查
+## 部署要求
 
 适用于基于 Docker Compose 的 TrueNAS SCALE Apps。旧 Kubernetes 版 SCALE 不适用。TrueNAS 官方提供“Install via YAML”入口，但只做基础语法检查，参数仍需自行核对。[官方说明](https://apps.truenas.com/managing-apps/installing-custom-apps/)
 
@@ -50,7 +52,7 @@ USB 转光纤设备必须被 Linux 识别成 USB Audio Class（UAC）声卡，�
 
 ## 构建与 CLI 部署
 
-以下命令在 Linux 项目目录执行。构建镜像需要下载上游依赖，镜像名为本地 `lan-audio-bridge:0.2.1`，没有假定存在的公共镜像仓库。
+以下命令在 Linux 项目目录执行。构建镜像需要下载上游依赖，生成本地镜像 `lan-audio-bridge:0.2.1`。项目未发布公共容器镜像。
 
 ```sh
 git clone https://github.com/zxsama/lan-audio-bridge.git
@@ -62,11 +64,11 @@ cp .env.example .env
 编辑 `.env`，必填：
 
 ```dotenv
-DATA_DIR=/mnt/你的池/专用数据集/lan-audio-bridge
-AUDIO_DEVICE=plughw:CARD=你的真实CARD名,DEV=0
+DATA_DIR=/mnt/pool/apps/lan-audio-bridge/data
+AUDIO_DEVICE=plughw:CARD=YourUSB,DEV=0
 ```
 
-上面是占位示例，不是可直接使用的路径。先在 TrueNAS 中创建并确认专用数据目录；其内容会保存 DLNA UUID、Spotify 缓存或授权状态，按敏感数据管理。Compose 使用必填变量与 `create_host_path: false`，路径缺失时拒绝启动，不自动在任意位置创建目录。不要将共享资料目录或数据池根目录挂到 `/data`。
+路径和 `YourUSB` 均为示例，须替换为实际值。部署前创建并确认专用数据目录，用于保存设备身份、Spotify 缓存及授权状态。Compose 使用必填变量与 `create_host_path: false`，路径缺失时拒绝启动。不要将共享资料目录或数据池根目录挂载为 `/data`。
 
 可选参数也有严格校验：`DEVICE_NAME` 最多 50 个 UTF-8 字节，只接受字母、数字、空格及 `._-()`；`NETWORK_INTERFACE` 如果指定，必须在容器内存在且带 IPv4 地址。`SAMPLE_RATE` 只接受 44100、48000、88200、96000、176400、192000，实际还需声卡支持；`OUTPUT_VOLUME` 为 0–100。四个 `ENABLE_*` 可分别设为 `false`，关闭对应接收器。
 
@@ -103,7 +105,7 @@ docker compose -f compose.yaml -f compose.host-avahi.yaml config > compose.rende
 
 ## 日常操作与恢复
 
-0.1.2 将 PulseAudio 改为专用 `pulse` 用户运行，并由 `dbus-run-session` 提供私有会话总线。其 HOME 和运行目录归该用户所有；Unix 音频 socket 延续容器内匿名访问，显式禁用不使用的 cookie 认证。由此解决系统模式、HOME、缺失 cookie 及误连发现代理的 D-Bus 警告，同时保留音源切换必需的动态模块加载。无需设置 `--disallow-module-loading`，也无需放宽宿主 D-Bus 权限。硬件模式按实际 `/dev/snd` 字符设备的组号授予 Pulse 访问权，见 [0.1.2 验证记录](docs/verification-0.1.2.md)。
+PulseAudio 使用专用 `pulse` 系统账户，由 `dbus-run-session` 提供私有会话总线。其 HOME 和运行目录由该账户持有；Unix 音频 socket 仅用于容器内访问，禁用未使用的 cookie 认证。动态模块加载用于音源切换。硬件模式按 `/dev/snd` 字符设备的实际组号授予访问权，无需放宽宿主 D-Bus 权限，详见 [0.1.2 验证记录](docs/verification-0.1.2.md)。
 
 `sh scripts/status.sh` 只读显示容器状态、协调器状态和 Pulse 模块；`owner` 是 `airplay`、`dlna`、`spotify`、`miplay` 或 `null`。停止当前客户端播放/断开连接后，旧音源不会自动恢复，必须重新开始播放才能争取输出。源暂停保留已打开的流不等于播放，协调器根据 Pulse 流的 active/corked 状态判断。
 
@@ -113,9 +115,9 @@ docker compose -f compose.yaml -f compose.host-avahi.yaml config > compose.rende
 
 为避免接收器把账号标识或带签名的媒体 URL 打入日志，其原始 stdout/stderr 被抑制；运行时记录启动、退出码、退避与 owner 变化。核心 Pulse/D-Bus/Avahi/NQPTP 日志仍输出，因此原始协议错误的诊断信息有限。`/data/dbus-machine-id` 保存容器的稳定机器标识，Spotify 只保留登录缓存、禁用音频文件缓存。
 
-## 无硬件测试
+## 软件测试
 
-Windows 本机需要保留运行的软件演示，可使用 [本机部署说明](docs/local-deployment.md) 中的 `scripts/local.ps1 Start / Status / Stop`。它使用独立 `compose.local.yaml` 和 null 输出，与以下测试实例分开；不代表手机局域网发现或 USB 光纤硬件已验证。
+Windows 本地演示可使用[部署说明](docs/local-deployment.md)中的 `scripts/local.ps1 Start / Status / Stop`。该实例使用独立 `compose.local.yaml` 和 null 输出，与测试实例分离；演示状态不能替代手机局域网发现或 USB 光纤硬件验证。
 
 测试配置是独立文件，不能和生产文件合并。它使用 bridge 网络、独立 Docker volume、null 输出，不映射 `/dev/snd`，也不发布端口；不会播放到真实声卡。
 
@@ -132,11 +134,15 @@ docker compose -f compose.test.yaml down
 
 独立发现测试从另一个容器查询 mDNS/SSDP 并检查广告端点。另可在关闭测试实例之前执行 `python3 tests/airplay_sender.py`，验证真实 RAOP/AirPlay 1 音频；它会在临时发送容器中下载固定版本测试依赖，完成后自动清理。该测试不代表 AirPlay 2 传音通过，细节见 [AirPlay 发送测试](docs/airplay-sender-validation.md)。
 
-## 工程与文档
+## 文档
 
 - [开发与测试](docs/development.md)：目录用途、单元测试、软件验证及本地文件管理。
-- [方案选择](docs/design.md)与[运行时约定](docs/runtime.md)：接收器选择、配置接口和音源协调规则。
+- [架构设计](docs/design.md)与[运行时约定](docs/runtime.md)：接收器选择、配置接口和音源协调规则。
 - [运维与真机验收](docs/operations.md)、[Windows 本机部署](docs/local-deployment.md)。
 - [复用宿主 Avahi](docs/host-avahi.md)：5353 冲突、独立代理与 TrueNAS 组合 YAML 部署。
 - [初次构建验证](docs/verification.md)、[2026-10-29 软件验证](docs/local-validation-2026-10-29.md)、[AirPlay 发送测试](docs/airplay-sender-validation.md)。
-- [上游来源与许可证说明](docs/UPSTREAM.md)。本项目自有代码尚未指定许可证；各上游组件保留自己的许可证。
+- [0.2.1 验证](docs/verification-0.2.1.md)、[0.2.0 验证](docs/verification-0.2.0.md)、[0.1.2 验证](docs/verification-0.1.2.md)。
+
+## 上游与许可
+
+上游组件及其许可证见 [UPSTREAM.md](docs/UPSTREAM.md)。各组件保留原有许可证与署名；本项目自有代码尚未指定许可证。

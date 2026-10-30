@@ -1,6 +1,6 @@
 # 0.2.0 软件验证（2026-10-31）
 
-本轮在 Windows 本机 Ubuntu WSL 的 Docker 中验证，Docker endpoint 为本地 Unix socket。没有连接或操作 TrueNAS Docker、导入 NAS 镜像、更新 Apps 或修改 NAS 服务。所有音频注入和故障测试均使用独立 bridge 网络、null 输出，无 `/dev/snd` 和公开端口。
+验证环境为 Windows / Ubuntu WSL 中的 Docker，通过本地 Unix socket 连接。所有音频注入和故障测试均使用独立 bridge 网络、null 输出，无 `/dev/snd` 和公开端口；结果不覆盖 TrueNAS 部署或物理音频输出。
 
 ## 实现
 
@@ -42,7 +42,7 @@ docker run --rm --network none -v "$PWD:/workspace:ro" --entrypoint python3 \
 
 新配置的 WAV、FLAC 各经历 11 次 HTTP 停顿，其中稳态窗口内各 4 次；稳态、恢复和 Seek 观察段均没有低于判定阈值的音频窗口，路由无异常反复重建。暂停和停止后输出静音。
 
-这些结果表明新的播放端缓冲改善了此可重复的短时供给不足场景，不证明 NAS 上原先偶发卡顿的现场根因已经确认，也不承诺抵御任意时长断流。该测试为平稳合成音，不能覆盖全部云端媒体、VBR 文件或毫秒级样本连续性。
+这些结果表明新的播放端缓冲改善了此可重复的短时供给不足场景，不构成部署环境中卡顿原因的诊断，也不承诺抵御任意时长断流。该测试为平稳合成音，不能覆盖全部云端媒体、VBR 文件或毫秒级样本连续性。
 
 ## 交付与未验证项
 
@@ -51,8 +51,8 @@ docker run --rm --network none -v "$PWD:/workspace:ro" --entrypoint python3 \
 最终镜像 ID：`sha256:1a45f8e06711c9e0abb11c914573fcd5ff7b921a960d51a2c6a8e448472af4f7`。
 本机导出文件 `dist/lan-audio-bridge-0.2.0.tar`（不进入 Git），SHA256：`8532f33bc77c43164b443f2d9eaa5e451b6956eb52b68f5c8da9e09e20170861`。
 
-本机 `compose.local.yaml` 演示实例已更新至 0.2.0，状态 healthy，Windows 的 localhost DLNA 描述接口可达。隔离测试/对照容器与网络已清理，测试数据卷保留；其他本机应用未修改。演示实例仍是 null 输出，不代表手机可以通过 Windows/WSL 网络发现它。
+`compose.local.yaml` 的 0.2.0 演示部署检查通过：状态 healthy，Windows 的 localhost DLNA 描述接口可达。该实例使用 null 输出，结果不代表手机可以通过 Windows/WSL 网络发现它。
 
-妙播尚未由真实小米手机/HyperOS 验收；当前覆盖 `_mi-connect._udp` + TCP/WFD/AAC 路径，不含 CoAP、旧版 5355 和 `_lyra-mdns`。模拟发送端与接收器复用固定版本协议定义，不能当成独立手机互通证明。AirPlay 2 手机、Spotify 账号播放和本次 USB 光纤实际听音也未重新验收。
+该版本的验证未覆盖真实小米手机/HyperOS；实现范围为 `_mi-connect._udp` + TCP/WFD/AAC 路径，不含 CoAP、旧版 5355 和 `_lyra-mdns`。模拟发送端与接收器复用固定版本协议定义，不能作为独立手机互通证明。AirPlay 2 手机传音、Spotify 账号播放和 USB 光纤实际听音也不在该版本的验证范围内。
 
-新版源码、部署参数和镜像仅在本机准备。TrueNAS 的实际更新由用户从原管理入口执行。原始测试结果留在被 Git 忽略的 `test-results/`，不上传局域网设备信息。
+本记录仅覆盖软件构建和隔离验证，TrueNAS 部署需另行验收。原始测试结果保存在被 Git 忽略的 `test-results/`；公开文档仅保留必要结果与复现方法。
