@@ -150,13 +150,17 @@ async def check(options):
 
     watcher = asyncio.create_task(watch_route())
     try:
-        async with asyncio.timeout(4):
-            while len(capture) < 48000 * 4 // 2:
-                if recorder.returncode is not None:
-                    raise RuntimeError("Pulse monitor recorder exited early")
-                await asyncio.sleep(0.05)
+        # Suspended output need not emit silent samples. Recording its monitor
+        # must not wake it or create a playback route before the sender starts.
+        await asyncio.sleep(0.3)
+        output = next(sink for sink in await pulse_list(options, "sinks")
+                      if sink["name"] == "output")
+        if output["state"] != "SUSPENDED" or not output["mute"]:
+            raise RuntimeError("output is not suspended before playback")
+        if recorder.returncode is not None:
+            raise RuntimeError("Pulse monitor recorder exited early")
         baseline = struct.unpack("<" + "h" * (len(capture) // 2), capture[:len(capture) & ~1])
-        baseline_peak = max(abs(value) for value in baseline)
+        baseline_peak = max((abs(value) for value in baseline), default=0)
         if baseline_peak > 5:
             raise RuntimeError("output monitor is not silent before playback")
         result = await asyncio.wait_for(MiPlaySourceSimulator(
@@ -170,6 +174,10 @@ async def check(options):
         modules = await pulse_list(options, "modules")
         if any(module["name"] == "module-loopback" for module in modules):
             raise RuntimeError("output route remained after the MiPlay session")
+        output = next(sink for sink in await pulse_list(options, "sinks")
+                      if sink["name"] == "output")
+        if output["state"] != "SUSPENDED" or not output["mute"]:
+            raise RuntimeError("output did not suspend after the MiPlay session")
         await asyncio.sleep(0.3)
         if recorder.returncode is not None:
             raise RuntimeError("Pulse monitor recorder exited early")

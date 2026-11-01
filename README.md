@@ -20,7 +20,7 @@
 ```sh
 git clone https://github.com/zxsama/lan-audio-bridge.git
 cd lan-audio-bridge
-docker build -t lan-audio-bridge:0.2.1 .
+docker build -t lan-audio-bridge:0.2.2 .
 cp .env.example .env
 ```
 

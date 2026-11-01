@@ -97,10 +97,10 @@ class PulseVolume:
         self.value = maximum
 
     async def set(self, requested: int) -> None:
-        self.value = max(0, min(int(requested), self.maximum))
+        value = max(0, min(int(requested), self.maximum))
         process = await asyncio.create_subprocess_exec(
             "pactl", "--server=" + os.environ.get("PULSE_SERVER", PULSE_SERVER),
-            "set-sink-volume", self.sink, str(round(self.value * 65536 / 100)),
+            "set-sink-volume", self.sink, str(round(value * 65536 / 100)),
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -108,6 +108,7 @@ class PulseVolume:
             await asyncio.wait_for(process.wait(), timeout=3)
             if process.returncode:
                 raise RuntimeError("cannot set MiPlay input volume")
+            self.value = value
         finally:
             await stop_process(process)
 
@@ -231,7 +232,8 @@ async def run(options, stopped: asyncio.Event | None = None) -> None:
 
     receiver = MiPlayReceiver(host=address, port=options.port, identity=identity,
                              advertise=False, sink_factory=sink_factory,
-                             volume_setter=volume.set, initial_volume=options.max_volume)
+                             volume_setter=volume.set, initial_volume=options.max_volume,
+                             max_volume=options.max_volume)
     publisher = AvahiPublisher(identity, options.interface)
     stopped = stopped or asyncio.Event()
     loop = asyncio.get_running_loop()

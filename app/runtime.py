@@ -42,7 +42,7 @@ class Config:
     audio_mode: str = "alsa"
     audio_device: str = ""
     sample_rate: int = 48000
-    output_volume: int = 70
+    output_volume: int = 100
     enabled: tuple[str, ...] = SOURCES
     interface: str = ""
     airplay_port: int = 7000
@@ -98,7 +98,7 @@ class Config:
         }
         if len({ports[source] for source in enabled}) != len(enabled):
             raise BridgeError("Enabled receiver ports must be distinct")
-        return cls(name, mode, device, rate, number("OUTPUT_VOLUME", 70, 0, 100),
+        return cls(name, mode, device, rate, number("OUTPUT_VOLUME", 100, 0, 100),
                    tuple(enabled), interface, ports["airplay"], ports["dlna"], ports["spotify"], avahi_mode,
                    ports["miplay"], number("DLNA_BUFFER_MS", 1000, 0, 5000),
                    number("OUTPUT_BUFFER_MS", 200, 50, 1000))
@@ -203,7 +203,9 @@ def pulse_config(config: Config) -> str:
         lines.append(f"load-module module-alsa-sink sink_name=output device={config.audio_device} rate={config.sample_rate} channels=2")
     lines += ["set-default-sink discard", "set-default-source discard.monitor", "set-sink-mute output yes",
               # Pulse CLI uses integer software volume (65536 = 100%).
-              f"set-sink-volume output {round(config.output_volume * 65536 / 100)}"]
+              f"set-sink-volume output {round(config.output_volume * 65536 / 100)}",
+              # Release the hardware while idle; mute alone still writes silence.
+              "suspend-sink output yes"]
     return "\n".join(lines) + "\n"
 
 
@@ -369,15 +371,24 @@ class Pulse:
 
     def clear(self) -> None:
         # Muting first also closes the route if unload fails. The caller exits on error.
-        self.command("set-sink-mute", "output", "1")
-        if self.route_module is not None:
-            self.command("unload-module", str(self.route_module))
-            self.route_module = None
+        try:
+            self.command("set-sink-mute", "output", "1")
+            if self.route_module is not None:
+                self.command("unload-module", str(self.route_module))
+                self.route_module = None
+        finally:
+            # Try releasing output even if mute/unload failed. Keep a failed
+            # module id so a subsequent route cannot reopen the old source.
+            self.command("suspend-sink", "output", "1")
 
     def route(self, source: str) -> None:
         if source not in SOURCES or self.route_module is not None:
             raise BridgeError("Invalid routing transition")
         try:
+            self.command("set-sink-mute", "output", "1")
+            # Create the loopback against an awake sink so its source side can
+            # start uncorked. Keep output muted until the new route is ready.
+            self.command("suspend-sink", "output", "0")
             module = self.command("load-module", "module-loopback", f"source={source}_bus.monitor",
                                   "sink=output", f"latency_msec={self.latency_ms}", "source_dont_move=true",
                                   "sink_dont_move=true", "channels=2", "remix=no")

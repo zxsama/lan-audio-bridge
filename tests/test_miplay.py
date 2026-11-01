@@ -95,6 +95,16 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             await volume.set(-9)
             self.assertEqual(spawn.call_args.args[-1], "0")
 
+    async def test_failed_volume_command_keeps_last_applied_value(self):
+        process = Mock(returncode=1, stdin=None)
+        process.wait = AsyncMock(return_value=1)
+        volume = PulseVolume("miplay_bus", 100)
+        volume.value = 35
+        with patch("miplay_receiver.asyncio.create_subprocess_exec", AsyncMock(return_value=process)):
+            with self.assertRaises(RuntimeError):
+                await volume.set(90)
+        self.assertEqual(volume.value, 35)
+
     async def test_stalled_child_is_reaped(self):
         process = Mock(stdin=None)
         process.wait = AsyncMock(side_effect=[asyncio.TimeoutError(), asyncio.TimeoutError(), 0])
@@ -335,7 +345,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             await receiver.stop()
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg required")
-    async def test_new_session_restores_announced_volume_after_previous_zero(self):
+    async def test_new_session_preserves_device_volume_after_previous_zero(self):
         from vendor.castfabric_miplay.media import RecordingPcmSink
         from vendor.castfabric_miplay.receiver import MiPlayReceiver
         from vendor.castfabric_miplay.simulator import MiPlaySourceSimulator
@@ -354,7 +364,9 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                     target_host="127.0.0.1", target_port=receiver.port,
                     duration=0.1, volume=volume).run(), 10)
                 await asyncio.wait_for(receiver.wait_for_idle(), 7)
-            self.assertEqual(volumes, [0, 70])
+            self.assertTrue(volumes)
+            self.assertTrue(all(volume == 0 for volume in volumes))
+            self.assertEqual(receiver.current_volume, 0)
         finally:
             await receiver.stop()
 
@@ -453,7 +465,8 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             samples = struct.unpack("<" + "h" * (len(pcm) // 2), pcm)
             self.assertGreater(len(pcm), 38400)
             self.assertGreater(max(abs(sample) for sample in samples), 500)
-            self.assertEqual(volumes, [43])
+            self.assertTrue(volumes)
+            self.assertTrue(all(volume == 43 for volume in volumes))
             self.assertFalse(sink.started)
             self.assertTrue(receiver.diagnostics()["last_session"]["authenticated"])
         finally:

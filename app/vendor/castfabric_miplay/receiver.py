@@ -20,7 +20,7 @@ from .media import (
     PcmSink,
     decode_rtp_mpegts,
 )
-from .protocol import Command, CommandFrameBuffer, OpenDeviceRequest, ProtocolError
+from .protocol import CommandFrameBuffer, OpenDeviceRequest, ProtocolError
 from .rtsp import ReceiverRtspSession, RtspBuffer
 
 
@@ -47,6 +47,7 @@ class MiPlayReceiver:
         initial_volume: int = 100,
         media_idle_timeout: float = 30.0,
         control_idle_timeout: float = 120.0,
+        max_volume: int = 100,
     ):
         self.host = host
         self.port = port
@@ -58,7 +59,10 @@ class MiPlayReceiver:
         self.volume_setter = volume_setter
         self.lifecycle_callback = lifecycle_callback
         self.handshake_timeout = max(0.05, float(handshake_timeout))
-        self.initial_volume = max(0, min(100, initial_volume))
+        self.max_volume = max(0, min(100, max_volume))
+        self.initial_volume = max(0, min(self.max_volume, initial_volume))
+        # Device volume is shared by playback and independent browse connections.
+        self.current_volume = self.initial_volume
         self.media_idle_timeout = max(0.05, float(media_idle_timeout))
         self.control_idle_timeout = max(0.05, float(control_idle_timeout))
         self._server: asyncio.AbstractServer | None = None
@@ -180,10 +184,11 @@ class MiPlayReceiver:
         session = LegacyReceiverSession(
             challenge=challenge,
             friendly_name=self.identity.friendly_name if self.identity else "MiPlay",
-            volume=self.initial_volume,
+            volume=self.current_volume,
             local_endpoint=local_endpoint,
             peer_endpoint=peer_endpoint,
             playback_state_provider=self.playback_state,
+            volume_provider=lambda: self.current_volume,
         )
         report = {
             "peer": "<local-address>" if peer else "unknown",
@@ -248,10 +253,14 @@ class MiPlayReceiver:
                     )
                     if len(report["control_trace"]) > 64:
                         del report["control_trace"][:-64]
-                    previous_volume = session.volume
                     result = session.process(frame)
                     report["authenticated"] = session.authenticated
                     report["safety"] = session.safety_diagnostics()
+                    if result.accepted and result.volume_request is not None:
+                        # Commit before yielding to ACK I/O: another connection may
+                        # query or change the volume while this writer drains.
+                        self.current_volume = min(self.max_volume, result.volume_request)
+                        self._queue_volume(self.current_volume)
                     if result.writes:
                         await write_control(result.writes)
                     if not result.accepted:
@@ -271,9 +280,6 @@ class MiPlayReceiver:
                         active_decoder = playback_state["decoder"]
                         if active_decoder is not None:
                             await active_decoder.set_paused(playback_state["paused"])
-                    if frame.command == Command.SET_VOLUME or session.volume != previous_volume:
-                        if session_reported:
-                            self._queue_volume(session.volume)
                     if result.open_request is not None:
                         if peer is None or result.open_request.host != str(peer[0]):
                             raise ProtocolError("WFD endpoint must match control sender")
@@ -291,9 +297,9 @@ class MiPlayReceiver:
                                     "media_format": "mpegts",
                                 },
                             )
-                            # A previous session may have left the input bus at
-                            # zero. Restore the value reported to this sender.
-                            self._queue_volume(session.volume)
+                            # Reapply the latest device value, including changes
+                            # accepted while the lifecycle callback was awaited.
+                            self._queue_volume(self.current_volume)
                         if wfd_task is not None:
                             if not wfd_task.done():
                                 wfd_task.cancel()

@@ -43,6 +43,7 @@ class ControlResult:
     reason: str
     open_request: OpenDeviceRequest | None = None
     playback_action: str | None = None
+    volume_request: int | None = None
 
 
 class LegacyReceiverSession:
@@ -58,6 +59,7 @@ class LegacyReceiverSession:
         local_endpoint: tuple[str, int] | None = None,
         peer_endpoint: tuple[str, int] | None = None,
         playback_state_provider: Callable[[], int] | None = None,
+        volume_provider: Callable[[], int] | None = None,
     ):
         if not 12 <= len(challenge) <= 17 or not challenge.isdigit():
             raise ValueError("legacy challenge must be 12 to 17 ASCII digits")
@@ -75,6 +77,7 @@ class LegacyReceiverSession:
         self._media_started = False
         self._paused = False
         self._playback_state_provider = playback_state_provider
+        self._volume_provider = volume_provider
         self._notification_sequence = 1
         self._local_endpoint = local_endpoint
         self._peer_endpoint = peer_endpoint
@@ -264,7 +267,8 @@ class LegacyReceiverSession:
         return self._empty_query_ack(frame, Command.GET_MIRROR_MODE_ACK, encode_scalar(2))
 
     def _get_volume(self, frame: CommandFrame) -> ControlResult:
-        return self._empty_query_ack(frame, Command.GET_VOLUME_ACK, encode_scalar(self.volume))
+        volume = self._volume_provider() if self._volume_provider else self.volume
+        return self._empty_query_ack(frame, Command.GET_VOLUME_ACK, encode_scalar(volume))
 
     def _set_volume(self, frame: CommandFrame) -> ControlResult:
         if len(frame.payload) != 4:
@@ -273,7 +277,9 @@ class LegacyReceiverSession:
         if not 0 <= volume <= 100:
             return self._stop("volume out of range")
         self.volume = volume
-        return self._ack(Command.SET_VOLUME_ACK, frame.sequence)
+        result = self._ack(Command.SET_VOLUME_ACK, frame.sequence)
+        result.volume_request = volume
+        return result
 
     def _get_state(self, frame: CommandFrame) -> ControlResult:
         # A list/browse connection observes the active media session rather than

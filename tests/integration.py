@@ -78,6 +78,8 @@ def route(owner):
     else:
         assert current["route_module"] is None, current
     output = next(s for s in pulse("sinks") if s["name"] == "output")
+    assert output["state"] == ("SUSPENDED" if owner is None else "RUNNING"), output["state"]
+    assert output["mute"] == (owner is None), output["mute"]
     streams = [s for s in pulse("sink-inputs") if int(s["sink"]) == int(output["index"])]
     assert len(streams) == (0 if owner is None else 1), streams
     if owner is not None:
@@ -195,8 +197,9 @@ def test_arbitration():
         assert route("airplay"), "Late old-stream end must not release current owner"
         tones.pop("airplay").close()
         eventually(lambda: route(None), "owner end releases output without fallback")
-        samples = capture()
-        assert max(map(abs, samples), default=0) < 10, "Idle output must be silent"
+        # An idle device must be suspended, not continuously producing silent PCM.
+        time.sleep(0.5)
+        assert route(None), "Idle output must remain suspended"
     finally:
         for tone in tones.values():
             tone.close()
@@ -329,11 +332,39 @@ def test_dlna():
             thread.join(timeout=3)
 
 
+def test_output_gain():
+    """Measure output gain on a real Pulse monitor with a fixed PCM source."""
+    output = next(s for s in pulse("sinks") if s["name"] == "output")
+    assert all(v["value"] == 65536 for v in output["volume"].values()), output["volume"]
+    tone = Tone("dlna")
+    try:
+        eventually(lambda: route("dlna"), "gain measurement playback")
+        time.sleep(0.5)
+        unity = amplitude(capture(), FREQUENCIES["dlna"])
+        command("pactl", "--server=" + SERVER, "set-sink-volume", "output", "45875")
+        time.sleep(0.5)
+        attenuated = amplitude(capture(), FREQUENCIES["dlna"])
+        command("pactl", "--server=" + SERVER, "set-sink-volume", "output", "65536")
+        time.sleep(0.5)
+        restored = amplitude(capture(), FREQUENCIES["dlna"])
+        assert 9000 < unity < 11000, unity
+        assert 2.7 < unity / attenuated < 3.1, (unity, attenuated)
+        assert 0.95 < restored / unity < 1.05, (unity, restored)
+        print(json.dumps({"output_gain": {"percent_100_amplitude": round(unity, 2),
+                                        "percent_70_amplitude": round(attenuated, 2),
+                                        "ratio": round(unity / attenuated, 3)}}), flush=True)
+    finally:
+        command("pactl", "--server=" + SERVER, "set-sink-volume", "output", "65536")
+        tone.close()
+    eventually(lambda: route(None), "gain measurement cleanup suspends output")
+
+
 def inside():
     assert os.environ.get("AUDIO_MODE") == "null", "Refusing tests against hardware output"
     assert not Path("/dev/snd").exists(), "Refusing a container with sound devices"
     assert all(os.environ.get("ENABLE_" + source.upper(), "").lower() == "true" for source in FREQUENCIES)
     test_arbitration()
+    test_output_gain()
     test_dlna()
     print("PASS: real Pulse routing/audio + DLNA SOAP. Phone/account/hardware tests remain separate.", flush=True)
 

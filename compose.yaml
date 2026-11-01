@@ -1,7 +1,7 @@
 name: lan-audio-bridge
 services:
   audio:
-    image: lan-audio-bridge:0.2.1
+    image: lan-audio-bridge:0.2.2
     pull_policy: never
     network_mode: host
     init: true
@@ -18,7 +18,7 @@ services:
       AUDIO_MODE: alsa
       AUDIO_DEVICE: ${AUDIO_DEVICE:?Set a stable ALSA device name in .env}
       SAMPLE_RATE: ${SAMPLE_RATE:-48000}
-      OUTPUT_VOLUME: ${OUTPUT_VOLUME:-70}
+      OUTPUT_VOLUME: ${OUTPUT_VOLUME:-100}
       ENABLE_AIRPLAY: ${ENABLE_AIRPLAY:-true}
       ENABLE_DLNA: ${ENABLE_DLNA:-true}
       ENABLE_SPOTIFY: ${ENABLE_SPOTIFY:-true}

@@ -18,11 +18,14 @@ Local changes:
   idle deadline, allowing heartbeat-only device-list connections to stay alive.
 
 - receiver.py: forward configured friendly name and initial bounded volume into
-  control sessions; detect volume changes through wrapped control commands;
+  control sessions; share the current volume across playback and browse connections.
+  Accepted SET_VOLUME commands expose explicit actions, including wrapped or repeated
+  requests, and commit the bounded device value before awaiting response I/O.
+  OPEN reapplies the current value rather than a connection-local initial value;
   limit control sessions to 16; require reverse WFD endpoint to match its
   control peer; propagate CLOSE/control EOF, RTSP and decoder termination;
   bound unpaused media inactivity to 30 seconds; shield reaping against racing
-  cancellation. A new session restores its announced volume on the input bus.
+  cancellation. Reconnecting does not reset or unmute the device volume.
 - control.py: expose decoded pause/resume actions even inside a type-1 wrapper.
 - media.py: bound decoder input drain and shutdown, reap ffmpeg and always stop
   the PCM sink even after a decoder or Pulse failure. Pause closes the Pulse

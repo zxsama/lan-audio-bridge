@@ -149,7 +149,15 @@ class ConfigurationTests(unittest.TestCase):
     def test_defaults_require_hardware_device(self):
         with self.assertRaises(BridgeError):
             Config.from_env({})
-        self.assertEqual(Config.from_env({"AUDIO_DEVICE": "hw:CARD=USB,DEV=0"}).output_volume, 70)
+        self.assertEqual(Config.from_env({"AUDIO_DEVICE": "hw:CARD=USB,DEV=0"}).output_volume, 100)
+
+    def test_default_output_is_unity_and_explicit_attenuation_is_preserved(self):
+        self.assertEqual(Config().output_volume, 100)
+        for volume in (0, 70, 100):
+            with self.subTest(volume=volume):
+                config = Config.from_env({"AUDIO_MODE": "null", "OUTPUT_VOLUME": str(volume)})
+                self.assertEqual(config.output_volume, volume)
+                self.assertIn(f"set-sink-volume output {round(volume * 65536 / 100)}", pulse_config(config))
 
     def test_null_mode_and_independent_enable_switches(self):
         config = Config.from_env({"AUDIO_MODE": "null", "ENABLE_SPOTIFY": "false", "ENABLE_AIRPLAY": "false", "ENABLE_MIPLAY": "false"})
@@ -209,6 +217,14 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(text.count("module-alsa-sink"), 1)
         self.assertIn("device=hw:CARD=USB,DEV=0", text)
 
+    def test_alsa_and_null_output_start_muted_and_suspended(self):
+        for mode in ("alsa", "null"):
+            with self.subTest(mode=mode):
+                lines = pulse_config(Config(audio_mode=mode, audio_device="hw:CARD=USB,DEV=0")).splitlines()
+                self.assertIn("set-sink-volume output 65536", lines)
+                self.assertLess(lines.index("set-sink-mute output yes"), lines.index("suspend-sink output yes"))
+                self.assertEqual(lines[-1], "suspend-sink output yes")
+
     def test_airplay2_configuration_and_real_pulse_backend_name(self):
         text = shairport_config(Config(interface="eth0"), "192.0.2.1")
         self.assertIn('service_type = "airplay2"', text)
@@ -257,7 +273,7 @@ class ConfigurationTests(unittest.TestCase):
 
 
 class PulseTests(unittest.TestCase):
-    def test_routing_argv_and_mute_unload_load_unmute_order(self):
+    def test_routing_mutes_unloads_suspends_then_resumes_loads_and_unmutes(self):
         commands = []
         def run(argv, **kwargs):
             self.assertFalse(kwargs.get("shell", False))
@@ -269,9 +285,21 @@ class PulseTests(unittest.TestCase):
         pulse.route("spotify")
         self.assertEqual(commands[0], ["set-sink-mute", "output", "1"])
         self.assertEqual(commands[1], ["unload-module", "12"])
-        self.assertEqual(commands[2][0:2], ["load-module", "module-loopback"])
-        self.assertIn("source=spotify_bus.monitor", commands[2])
-        self.assertEqual(commands[3], ["set-sink-mute", "output", "0"])
+        self.assertEqual(commands[2], ["suspend-sink", "output", "1"])
+        self.assertEqual(commands[3], ["set-sink-mute", "output", "1"])
+        self.assertEqual(commands[4], ["suspend-sink", "output", "0"])
+        self.assertEqual(commands[5][0:2], ["load-module", "module-loopback"])
+        self.assertIn("source=spotify_bus.monitor", commands[5])
+        self.assertEqual(commands[6:], [["set-sink-mute", "output", "0"]])
+
+    def test_clear_without_route_still_suspends_output(self):
+        calls = []
+        def run(argv, **kwargs):
+            calls.append(argv[2:])
+            return subprocess.CompletedProcess(argv, 0, "")
+        pulse = Pulse(run)
+        pulse.clear()
+        self.assertEqual(calls, [["set-sink-mute", "output", "1"], ["suspend-sink", "output", "1"]])
 
     def test_unload_failure_does_not_load_new_route(self):
         calls = []
@@ -282,8 +310,68 @@ class PulseTests(unittest.TestCase):
         pulse.route_module = 8
         with self.assertRaises(BridgeError):
             pulse.clear()
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
         self.assertEqual(calls[0][-3:], ["set-sink-mute", "output", "1"])
+        self.assertEqual(calls[-1][-3:], ["suspend-sink", "output", "1"])
+        self.assertEqual(pulse.route_module, 8)
+        with self.assertRaises(BridgeError):
+            pulse.route("spotify")
+        self.assertEqual(len(calls), 3)
+
+    def test_failed_mute_still_attempts_suspend_without_detaching_route(self):
+        calls = []
+        def run(argv, **kwargs):
+            calls.append(argv[2:])
+            return subprocess.CompletedProcess(argv, int("set-sink-mute" in argv), "")
+        pulse = Pulse(run)
+        pulse.route_module = 8
+        with self.assertRaises(BridgeError):
+            pulse.clear()
+        self.assertEqual(calls, [["set-sink-mute", "output", "1"], ["suspend-sink", "output", "1"]])
+        self.assertEqual(pulse.route_module, 8)
+
+    def test_failed_resume_resuspends_without_loading_or_unmuting(self):
+        calls = []
+        def run(argv, **kwargs):
+            calls.append(argv[2:])
+            fail = argv[-3:] == ["suspend-sink", "output", "0"]
+            return subprocess.CompletedProcess(argv, int(fail), "7" if "load-module" in argv else "")
+        pulse = Pulse(run)
+        with self.assertRaises(BridgeError):
+            pulse.route("dlna")
+        self.assertNotIn(["set-sink-mute", "output", "0"], calls)
+        self.assertFalse(any(call[0] == "load-module" for call in calls))
+        self.assertEqual(calls[-2:], [["set-sink-mute", "output", "1"], ["suspend-sink", "output", "1"]])
+        self.assertIsNone(pulse.route_module)
+
+    def test_failed_or_unidentified_route_resuspends_without_unmuting(self):
+        for result_code, module in ((1, ""), (0, "unknown")):
+            with self.subTest(result_code=result_code, module=module):
+                calls = []
+                def run(argv, **kwargs):
+                    calls.append(argv[2:])
+                    loading = "load-module" in argv
+                    return subprocess.CompletedProcess(argv, result_code if loading else 0, module if loading else "")
+                pulse = Pulse(run)
+                with self.assertRaises(BridgeError):
+                    pulse.route("dlna")
+                self.assertIn(["suspend-sink", "output", "0"], calls)
+                self.assertNotIn(["set-sink-mute", "output", "0"], calls)
+                self.assertEqual(calls[-1], ["suspend-sink", "output", "1"])
+                self.assertIsNone(pulse.route_module)
+
+    def test_suspend_failure_propagates_after_removing_route(self):
+        calls = []
+        def run(argv, **kwargs):
+            calls.append(argv[2:])
+            return subprocess.CompletedProcess(argv, int("suspend-sink" in argv), "")
+        pulse = Pulse(run)
+        pulse.route_module = 8
+        with self.assertRaises(BridgeError):
+            pulse.clear()
+        self.assertEqual(calls, [["set-sink-mute", "output", "1"], ["unload-module", "8"],
+                                 ["suspend-sink", "output", "1"]])
+        self.assertIsNone(pulse.route_module)
 
     def test_failed_unmute_attempts_to_clear_output(self):
         calls = []
@@ -294,7 +382,8 @@ class PulseTests(unittest.TestCase):
         pulse = Pulse(run)
         with self.assertRaises(BridgeError):
             pulse.route("dlna")
-        self.assertEqual(calls[-2:], [["set-sink-mute", "output", "1"], ["unload-module", "7"]])
+        self.assertEqual(calls[-3:], [["set-sink-mute", "output", "1"], ["unload-module", "7"],
+                                     ["suspend-sink", "output", "1"]])
         self.assertIsNone(pulse.route_module)
 
     def test_pactl_output_and_metadata_are_not_exposed_on_failure(self):

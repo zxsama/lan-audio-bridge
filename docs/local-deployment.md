@@ -1,6 +1,6 @@
 # Windows 本机软件演示部署
 
-此部署用于本机 Docker 软件验证，不访问真实声卡。当前配置要求 Ubuntu WSL 中已有 `lan-audio-bridge:0.2.1` 镜像，固定 `AUDIO_MODE=null`，不会向物理音频设备输出声音。更新配置前先构建或导入对应镜像；历史验证记录中的旧镜像版本保持原样。
+此部署用于本机 Docker 软件验证，不访问真实声卡。当前配置要求 Ubuntu WSL 中已有 `lan-audio-bridge:0.2.2` 镜像，固定 `AUDIO_MODE=null`，不会向物理音频设备输出声音。更新配置前先构建或导入对应镜像；历史验证记录中的旧镜像版本保持原样。
 
 在 Windows PowerShell 中切换到本项目目录：
 

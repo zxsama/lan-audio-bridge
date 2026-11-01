@@ -36,7 +36,7 @@ python3 -B -m unittest discover -s tests -p test_runtime.py -v
 测试配置使用 bridge 网络、独立 Docker volume 和 null 输出，不映射 `/dev/snd`，不发布端口，也不会播放到真实声卡。在 Linux/WSL 项目目录构建并运行独立测试实例：
 
 ```sh
-docker build -t lan-audio-bridge:0.2.1 .
+docker build -t lan-audio-bridge:0.2.2 .
 docker compose -f compose.test.yaml config --quiet
 docker compose -f compose.test.yaml up -d --wait --wait-timeout 120
 python3 -B tests/integration.py
@@ -65,7 +65,7 @@ docker compose -f compose.test.yaml down
 构建当前镜像后，可独立执行：
 
 ```sh
-python3 -B tests/host_avahi.py --image lan-audio-bridge:0.2.1
+python3 -B tests/host_avahi.py --image lan-audio-bridge:0.2.2
 ```
 
 该脚本在临时 Docker 网络命名空间中模拟独占 5353 的 Avahi、私有 D-Bus 和独立过滤代理，使用独立资源前缀并清理测试资源；不使用真实 host network、宿主 D-Bus、声卡、账号或发布端口。应检查代理访问限制、动态服务公告与失联恢复的实际输出。本节提供运行方法，各版本的执行结果见相应验证记录；新的执行结果应单独记录。
@@ -87,3 +87,5 @@ python3 -B tests/host_avahi.py --image lan-audio-bridge:0.2.1
 新增 `tests/dlna_jitter.py --format wav` 和 `--format flac`：在隔离 null 容器内模拟 HTTP 500ms 停顿，检查持续 PCM、路由和 Pause/Resume/Seek/Stop。`--label` 仅标记输出，`--container` 选择已经启动的隔离测试容器。妙播模拟发送测试见 [miplay.md](miplay.md)。
 
 0.2.1 增加 `tests/test_miplay_presence.py` 的真实 TCP 超时/状态回归，以及 `python3 tests/miplay_presence.py` 的独立容器 40 秒持续发现检查。后者仅发送认证、心跳和查询，不发送 OPEN、不播放媒体；要求已启动独立 `compose.test.yaml`，自动清理观察者。见 [0.2.1 验证](verification-0.2.1.md)。
+
+0.2.2 增加 `tests/test_miplay_volume.py` 的跨连接音量和并发等待回归，以及 `tests/miplay_volume.py` 的真实服务/输入总线一致性检查。`integration.py` 同时验证输出挂起、恢复和 70%/100% 的实际幅度差异。测试方法与结果见 [0.2.2 验证](verification-0.2.2.md)。
