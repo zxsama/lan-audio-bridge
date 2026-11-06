@@ -15,6 +15,7 @@ Import-Module (Join-Path $PSScriptRoot 'windows\Voicemeeter.psm1') -Force
 $stateRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'LanAudioBridge\WindowsAudio'
 $settingsPath = Join-Path $stateRoot 'settings.json'
 $backupPath = Join-Path $stateRoot 'original.json'
+$endpointBackupPath = Join-Path $stateRoot 'endpoints-original.json'
 $programRoot = Join-Path $stateRoot 'program'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $runName = 'LanAudioBridgeAudio'
@@ -105,6 +106,55 @@ function Connect-Remote {
     } catch { $connection.Dispose(); throw }
 }
 
+function Save-ExtraEndpointBackup {
+    param([object[]]$Endpoints)
+    $saved = @()
+    if (Test-Path -LiteralPath $endpointBackupPath) {
+        $saved = @((Get-Content -LiteralPath $endpointBackupPath -Raw | ConvertFrom-Json).Endpoints)
+    }
+    foreach ($endpoint in $Endpoints) {
+        if (@($saved | Where-Object { $_.Id -eq $endpoint.Id }).Count -eq 0) { $saved += $endpoint }
+    }
+    Write-AudioJson $endpointBackupPath ([pscustomobject]@{ Schema = 1; Endpoints = @($saved) })
+}
+
+function Protect-PendingRebootOutput {
+    $all = @([LanAudioBridge.WindowsAudio.Endpoints]::ListRender())
+    try { $main = Get-VoicemeeterEndpoint $all }
+    catch {
+        # A correctly registered driver can expose its endpoints only after a
+        # reboot (CM_PROB_NEED_RESTART). Cleanup must not cancel that continuation.
+        Write-Output 'Playback endpoint cleanup deferred until the driver is ready after reboot.'
+        return
+    }
+    $extra = @(Get-VoicemeeterExtraEndpoints $all $main)
+    if (-not $extra.Count) { return }
+    Save-ExtraEndpointBackup $extra
+    $before = @(Get-DefaultEndpoints)
+    $original = Get-Content -LiteralPath $backupPath -Raw | ConvertFrom-Json
+    $vaioIds = @($extra | ForEach-Object Id) + @($main.Id)
+    try {
+        # Keep existing speakers working until the required reboot/configuration.
+        foreach ($current in $before) {
+            if ($vaioIds -contains $current.Id) {
+                $prior = @($original.Defaults | Where-Object { $_.Role -eq $current.Role })
+                if ($prior.Count -ne 1 -or -not $prior[0].Id -or $vaioIds -contains $prior[0].Id -or
+                    @($all | Where-Object { $_.Id -eq $prior[0].Id -and $_.Active }).Count -ne 1) {
+                    throw 'Cannot restore the original output before reboot. Reconnect it and retry Setup.'
+                }
+                [LanAudioBridge.WindowsAudio.Endpoints]::SetDefault($prior[0].Id, [int]$current.Role)
+            }
+        }
+        Set-EndpointVisibilityState $extra $false
+    } catch {
+        $failure = $_
+        try { Set-EndpointVisibilityState $extra $true } catch { Write-Warning $_.Exception.Message }
+        try { Restore-DefaultEndpoints $before } catch { Write-Warning $_.Exception.Message }
+        throw $failure
+    }
+    Write-Output 'Unused VAIO playback endpoints disabled; original speakers retained until configuration after reboot.'
+}
+
 try {
     if ($Action -eq 'Plan') {
         $config = New-DesktopAudioConfig $Address $Port $StreamName
@@ -149,6 +199,16 @@ try {
         if (-not (Test-Path -LiteralPath $backupPath)) { throw 'No original configuration backup is available.' }
         $original = Get-Content -LiteralPath $backupPath -Raw | ConvertFrom-Json
         $profile = Join-Path $stateRoot 'original.xml'
+        if (Test-Path -LiteralPath $endpointBackupPath) {
+            $endpointSnapshot = Get-Content -LiteralPath $endpointBackupPath -Raw | ConvertFrom-Json
+            $present = @([LanAudioBridge.WindowsAudio.Endpoints]::ListRender() | Where-Object { $_.State -in @(1,2) } | ForEach-Object Id)
+            $restorable = @($endpointSnapshot.Endpoints | Where-Object { $present -contains $_.Id })
+            if ($restorable.Count -ne @($endpointSnapshot.Endpoints).Count) {
+                Write-Warning 'Some saved auxiliary endpoints no longer exist; continuing to restore Windows output and startup settings.'
+            }
+            try { Set-EndpointVisibilityState $restorable $true }
+            catch { Write-Warning "Auxiliary endpoint restore incomplete: $($_.Exception.Message)" }
+        }
         # Validate original Windows devices before changing the mixer.
         $active = @([LanAudioBridge.WindowsAudio.Endpoints]::ListRender() | Where-Object Active | ForEach-Object Id)
         foreach ($endpoint in $original.Defaults) {
@@ -157,17 +217,26 @@ try {
         $mixerRestored = $false
         if ($directory -and (Test-Path -LiteralPath $profile)) {
             $remote = Connect-Remote $directory -StartIfNeeded
-            $remote.SetString('Command.Load', $profile)
-            Start-Sleep -Milliseconds 1000
-            Wait-Voicemeeter $remote
-            $mixerRestored = $true
+            $parametersFile = Join-Path $stateRoot 'original-parameters.json'
+            try {
+                if (Test-Path -LiteralPath $parametersFile) {
+                    $storedParameters = Get-Content -LiteralPath $parametersFile -Raw | ConvertFrom-Json
+                    $expected = [ordered]@{}
+                    foreach ($property in $storedParameters.PSObject.Properties) { $expected[$property.Name] = $property.Value }
+                    Restore-VoicemeeterXml $remote $profile $expected
+                    $mixerRestored = $true
+                } else {
+                    $remote.SetString('Command.Load', $profile)
+                    Write-Warning 'Legacy XML submitted without a parameter snapshot; verify the mixer configuration in Voicemeeter.'
+                }
+            } catch { Write-Warning "Mixer restore incomplete: $($_.Exception.Message)" }
         }
         Restore-DefaultEndpoints $original.Defaults
         Set-StartupValue $original.Startup
         if ($settings) { $settings.Status = 'Restored'; Write-AudioJson $settingsPath $settings }
         Write-Output 'Original playback defaults and startup entry restored. Voicemeeter remains installed.'
-        if ($mixerRestored) { Write-Output 'The saved mixer profile was submitted to Voicemeeter; review it in Voicemeeter if needed.' }
-        else { Write-Output 'No saved mixer profile was loaded (installation may not have reached configuration).' }
+        if ($mixerRestored) { Write-Output 'The saved mixer parameters were restored and verified.' }
+        else { Write-Output 'Mixer restoration was not verified; see the preceding messages and retained XML backup.' }
         exit 0
     }
 
@@ -184,11 +253,22 @@ try {
     }
     $config = New-DesktopAudioConfig $Address $Port $StreamName
     $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')
+    Copy-LocalProgram
+    if ($settings -and $settings.Status -eq 'InstallFailed' -and $directory) {
+        $installed = Get-VoicemeeterInstallEvidence $directory
+        if (-not $installed.Complete) { throw ('Existing installation is incomplete: ' + ($installed.Issues -join '; ')) }
+        # Recover the old return-code-only failure without reinstalling drivers.
+        $settings.Status = 'PendingReboot'
+        Write-AudioJson $settingsPath $settings
+        Set-StartupAction 'Resume'
+        Write-Output 'Application and signed VAIO driver verified; recovered the pending-reboot configuration.'
+    }
     if ($settings -and $settings.Status -eq 'PendingReboot' -and $settings.InstallBoot -eq $boot) {
+        try { Protect-PendingRebootOutput }
+        catch { Write-Warning "Playback endpoint cleanup deferred: $($_.Exception.Message)" }
         Write-Output 'Voicemeeter requires a Windows restart. Configuration will resume at the next sign-in.'
         exit 3010
     }
-    Copy-LocalProgram
     if (-not (Test-Path -LiteralPath $backupPath)) {
         Write-AudioJson $backupPath ([pscustomobject]@{
             Schema = 1; Defaults = @(Get-DefaultEndpoints); Startup = Get-StartupValue
@@ -210,8 +290,11 @@ try {
             Set-StartupAction 'Resume'
             # Only the official installer is elevated, never the downloaded scripts.
             $process = Start-Process -FilePath $installer -ArgumentList '-h -i' -Verb RunAs -WindowStyle Hidden -Wait -PassThru
-            if ($process.ExitCode -ne 0) { throw "Voicemeeter installer returned $($process.ExitCode). See setup.log; success has not been assumed." }
-            if (-not (Get-VoicemeeterDirectory)) { throw 'Installer exited but the required application files are not present.' }
+            $evidence = Get-VoicemeeterInstallEvidence
+            $pending.Status = Get-VoicemeeterInstallResult $process.ExitCode $evidence
+            $pending | Add-Member -NotePropertyName InstallerExitCode -NotePropertyValue $process.ExitCode -Force
+            Write-AudioJson $settingsPath $pending
+            Write-Output "Installer returned $($process.ExitCode); application and signed VAIO driver registration verified."
         } catch {
             $failure = $_
             try { Set-StartupValue $previousStartup }
@@ -221,16 +304,23 @@ try {
             catch { Write-Warning "Could not save installation failure: $($_.Exception.Message)" }
             throw $failure
         }
+        try { Protect-PendingRebootOutput }
+        catch { Write-Warning "Playback endpoint cleanup deferred: $($_.Exception.Message)" }
         Write-Output 'Installation completed. Restart Windows when convenient; configuration resumes at sign-in. No restart was initiated.'
         exit 3010
     }
 
+    $evidence = Get-VoicemeeterInstallEvidence $directory
+    if (-not $evidence.Ready) { throw ('Voicemeeter driver is not ready: ' + ($evidence.Issues -join '; ') + '. Restart Windows after installation.') }
     $remote = Connect-Remote $directory -StartIfNeeded
     $target = Get-VoicemeeterEndpoint @([LanAudioBridge.WindowsAudio.Endpoints]::ListRender())
+    $extraEndpoints = @(Get-VoicemeeterExtraEndpoints @([LanAudioBridge.WindowsAudio.Endpoints]::ListRender()) $target)
+    Save-ExtraEndpointBackup $extraEndpoints
     $transaction = Join-Path $stateRoot ('rollback-' + [Guid]::NewGuid().ToString('N') + '.xml')
     Save-VoicemeeterXml $remote $transaction
     $originalXml = Join-Path $stateRoot 'original.xml'
-    if (-not (Test-Path -LiteralPath $originalXml)) { Copy-Item -LiteralPath $transaction -Destination $originalXml }
+    $newOriginalXml = -not (Test-Path -LiteralPath $originalXml)
+    if ($newOriginalXml) { Copy-Item -LiteralPath $transaction -Destination $originalXml }
     $beforeDefaults = @(Get-DefaultEndpoints)
     $beforeStartup = Get-StartupValue
     $ownedSlot = -1
@@ -242,6 +332,8 @@ try {
             $remote.GetFloat("$prefix.port") -eq $settings.Port) { $ownedSlot = $settings.Slot }
     }
     $slot = Get-DesktopStreamSlot $remote $config $ownedSlot
+    $beforeParameters = Get-DesktopAudioSnapshot $remote $config $slot
+    if ($newOriginalXml) { Write-AudioJson (Join-Path $stateRoot 'original-parameters.json') $beforeParameters }
     $desktopProfile = Join-Path $stateRoot 'desktop.xml'
     $oldProfile = if (Test-Path -LiteralPath $desktopProfile) { [IO.File]::ReadAllBytes($desktopProfile) } else { $null }
     $profileCommitted = $false
@@ -251,6 +343,7 @@ try {
         foreach ($role in 0..2) {
             if ([LanAudioBridge.WindowsAudio.Endpoints]::GetDefault($role) -cne $target.Id) { throw 'Windows did not accept the playback device change.' }
         }
+        Set-EndpointVisibilityState $extraEndpoints $false
         $newProfile = Join-Path $stateRoot ('desktop-' + [Guid]::NewGuid().ToString('N') + '.xml')
         Save-VoicemeeterXml $remote $newProfile
         Move-Item -LiteralPath $newProfile -Destination $desktopProfile -Force
@@ -265,7 +358,9 @@ try {
         $failure = $_
         # Independent rollback steps: an unplugged endpoint must not prevent
         # restoring the startup profile or the startup registry entry.
-        try { $remote.SetString('Command.Load', $transaction); Start-Sleep -Milliseconds 500 }
+        try { Set-EndpointVisibilityState $extraEndpoints $true }
+        catch { Write-Warning "Playback endpoint rollback failed: $($_.Exception.Message)" }
+        try { Restore-VoicemeeterXml $remote $transaction $beforeParameters }
         catch { Write-Warning "Mixer rollback failed: $($_.Exception.Message). Backup: $transaction" }
         try { Restore-DefaultEndpoints $beforeDefaults }
         catch { Write-Warning "Playback rollback failed: $($_.Exception.Message)" }

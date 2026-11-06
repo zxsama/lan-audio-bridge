@@ -16,6 +16,9 @@ namespace LanAudioBridge.WindowsAudio
         public string Id { get; internal set; }
         public string Name { get; internal set; }
         public bool Active { get; internal set; }
+        public uint State { get; internal set; }
+        public string WaveInterface { get; internal set; }
+        public string ParentDevice { get; internal set; }
     }
 
     public static class Endpoints
@@ -58,7 +61,14 @@ namespace LanAudioBridge.WindowsAudio
                                 ? Marshal.PtrToStringUni(value.Pointer) : id;
                         }
                         finally { PropVariantClear(ref value); }
-                        result.Add(new EndpointInfo { Id = id, Name = name, Active = (state & 1) != 0 });
+                        result.Add(new EndpointInfo
+                        {
+                            Id = id, Name = name, Active = (state & 1) != 0, State = state,
+                            WaveInterface = storeResult < 0 ? null : ReadOptionalString(properties,
+                                new PropertyKey(new Guid("233164c8-1b2c-4c7d-bc68-b671687a2567"), 1)),
+                            ParentDevice = storeResult < 0 ? null : ReadOptionalString(properties,
+                                new PropertyKey(new Guid("b3f8fa53-0004-438e-9003-51a46e139bfc"), 2))
+                        });
                     }
                     finally { Release(properties); Release(device); }
                 }
@@ -85,11 +95,40 @@ namespace LanAudioBridge.WindowsAudio
             finally { Release(device); Release(enumerator); }
         }
 
+        public static uint GetState(string id)
+        {
+            ValidateEndpointId(id);
+            IMMDeviceEnumerator enumerator = null;
+            IMMDevice device = null;
+            try
+            {
+                enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+                Check(enumerator.GetDevice(id, out device), "Find audio endpoint");
+                uint state;
+                Check(device.GetState(out state), "Read endpoint state");
+                return state;
+            }
+            finally { Release(device); Release(enumerator); }
+        }
+
+        public static void SetVisibility(string id, bool visible)
+        {
+            ValidateEndpointId(id);
+            IPolicyConfig policy = null;
+            try
+            {
+                // Undocumented Windows desktop interface. The caller owns backup,
+                // endpoint selection, and verification of the resulting state.
+                policy = (IPolicyConfig)new PolicyConfigClient();
+                Check(policy.SetEndpointVisibility(id, visible ? 1 : 0), "Set audio endpoint visibility");
+            }
+            finally { Release(policy); }
+        }
+
         public static void SetDefault(string id, int role)
         {
             ValidateRole(role);
-            if (String.IsNullOrWhiteSpace(id) || id.IndexOf('\0') >= 0)
-                throw new ArgumentException("A nonempty endpoint ID is required.", "id");
+            ValidateEndpointId(id);
             IPolicyConfig policy = null;
             try
             {
@@ -99,6 +138,26 @@ namespace LanAudioBridge.WindowsAudio
                 Check(policy.SetDefaultEndpoint(id, role), "Set default render endpoint for role " + role);
             }
             finally { Release(policy); }
+        }
+
+        private static string ReadOptionalString(IPropertyStore properties, PropertyKey key)
+        {
+            if (properties == null) return null;
+            PropVariant value = new PropVariant();
+            try
+            {
+                int hr = properties.GetValue(ref key, out value);
+                return hr >= 0 && value.VariantType == 31 && value.Pointer != IntPtr.Zero
+                    ? Marshal.PtrToStringUni(value.Pointer) : null;
+            }
+            catch (COMException) { return null; }
+            finally { PropVariantClear(ref value); }
+        }
+
+        private static void ValidateEndpointId(string id)
+        {
+            if (String.IsNullOrWhiteSpace(id) || id.IndexOf('\0') >= 0)
+                throw new ArgumentException("A nonempty endpoint ID is required.", "id");
         }
 
         private static void ValidateRole(int role)
@@ -183,7 +242,7 @@ namespace LanAudioBridge.WindowsAudio
             [PreserveSig] int GetPropertyValue(IntPtr id, IntPtr key, IntPtr value);
             [PreserveSig] int SetPropertyValue(IntPtr id, IntPtr key, IntPtr value);
             [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string id, int role);
-            [PreserveSig] int SetEndpointVisibility(IntPtr id, int visible);
+            [PreserveSig] int SetEndpointVisibility([MarshalAs(UnmanagedType.LPWStr)] string id, int visible);
         }
     }
 

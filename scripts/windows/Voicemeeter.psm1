@@ -71,6 +71,63 @@ function Assert-VoicemeeterInstaller {
     }
 }
 
+function Get-VoicemeeterInstallEvidence {
+    param([string]$Directory = (Get-VoicemeeterDirectory))
+    $issues = @(); $versions = @()
+    $package = Get-VoicemeeterPackage
+    foreach ($name in @('voicemeeter.exe', 'VoicemeeterRemote64.dll')) {
+        $path = if ($Directory) { Join-Path $Directory $name } else { $null }
+        if (-not $path -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            $issues += "Missing application file: $name"; $versions += $null; continue
+        }
+        $info = (Get-Item -LiteralPath $path).VersionInfo
+        $version = '{0}.{1}.{2}.{3}' -f $info.FileMajorPart,$info.FileMinorPart,$info.FileBuildPart,$info.FilePrivatePart
+        $versions += $version
+        if ($version -ne $package.Version) { $issues += "Unsupported application version: $name $version" }
+        $signature = Get-AuthenticodeSignature -LiteralPath $path
+        if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate -or
+            $signature.SignerCertificate.GetNameInfo('SimpleName', $false) -cne $package.Publisher) {
+            $issues += "Unverified application signature: $name"
+        }
+    }
+    $drivers = @(Get-CimInstance Win32_PnPSignedDriver -Filter "DeviceName='VB-Audio Voicemeeter VAIO'")
+    $devices = @(Get-CimInstance Win32_PnPEntity -Filter "Name='VB-Audio Voicemeeter VAIO'")
+    $service = Get-CimInstance Win32_SystemDriver -Filter "Name='VBVoicemeeterVAIOMME'"
+    $driver = $null; $device = $null
+    if ($drivers.Count -ne 1) { $issues += 'Expected one registered VAIO driver' }
+    else {
+        $driver = $drivers[0]
+        if (-not $driver.IsSigned -or $driver.Signer -ne 'Microsoft Windows Hardware Compatibility Publisher' -or
+            $driver.DriverVersion -ne '3.4.1.9' -or -not $driver.InfName) { $issues += 'VAIO driver version or signature does not match the supported package' }
+        $matches = @($devices | Where-Object { $_.PNPDeviceID -eq $driver.DeviceID })
+        if ($matches.Count -ne 1) { $issues += 'Registered VAIO device is missing or ambiguous' }
+        else {
+            $device = $matches[0]
+            if ($device.ConfigManagerErrorCode -notin @(0,14)) { $issues += "VAIO device problem code: $($device.ConfigManagerErrorCode)" }
+        }
+    }
+    if (-not $service -or -not $service.PathName -or -not (Test-Path -LiteralPath $service.PathName)) {
+        $issues += 'VAIO driver service or binary is missing'
+    }
+    [pscustomobject]@{
+        Complete = $issues.Count -eq 0
+        Ready = ($issues.Count -eq 0 -and $device.ConfigManagerErrorCode -eq 0 -and $service.State -eq 'Running')
+        Issues = $issues; Directory = $Directory; ApplicationVersion = $versions[0]; RemoteVersion = $versions[1]
+        DriverVersion = $(if ($driver) { $driver.DriverVersion } else { $null })
+        DeviceId = $(if ($device) { $device.PNPDeviceID } else { $null })
+        DriverProblem = $(if ($device) { $device.ConfigManagerErrorCode } else { $null })
+    }
+}
+
+function Get-VoicemeeterInstallResult {
+    param([int]$ExitCode, $Evidence)
+    # The pinned 1.1.3.0 installer returns 1 on BOTH its completed and warning
+    # paths. An exit code is only a candidate result, never proof of installation.
+    if ($ExitCode -notin @(0,1)) { throw "Voicemeeter installer returned unsupported result $ExitCode." }
+    if (-not $Evidence.Complete) { throw ('Incomplete Voicemeeter installation: ' + ($Evidence.Issues -join '; ')) }
+    return 'PendingReboot'
+}
+
 function Get-VoicemeeterInstaller {
     param([string]$CacheDirectory)
     $package = Get-VoicemeeterPackage
@@ -171,6 +228,30 @@ function Test-DesktopAudioPlan {
     return $true
 }
 
+function Get-DesktopAudioSnapshot {
+    param($Remote, $Config, [int]$Slot)
+    $keys = Get-DesktopAudioPlan $Config $Slot
+    $keys['vban.Enable'] = 0
+    $keys["vban.outstream[$Slot].on"] = 0
+    $snapshot = [ordered]@{}
+    $null = $Remote.Dirty()
+    foreach ($name in $keys.Keys) {
+        $snapshot[$name] = if ($keys[$name] -is [string]) { $Remote.GetString($name) } else { $Remote.GetFloat($name) }
+    }
+    return $snapshot
+}
+
+function Restore-VoicemeeterXml {
+    param($Remote, [string]$Path, $Expected, [int]$TimeoutSeconds = 10)
+    $Remote.SetString('Command.Load', $Path)
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        Start-Sleep -Milliseconds 100
+        try { if (Test-DesktopAudioPlan $Remote $Expected) { return } } catch { }
+    } while ($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+    throw 'Voicemeeter XML restore did not match the saved parameters; backup has been retained.'
+}
+
 function Set-DesktopAudioPlan {
     param($Remote, $Config, [int]$Slot, [int]$TimeoutSeconds = 15)
     if ($Remote.Type() -ne 1) { throw 'Only Voicemeeter Standard is supported. Leave Banana/Potato unchanged.' }
@@ -198,11 +279,40 @@ function Set-DesktopAudioPlan {
 
 function Get-VoicemeeterEndpoint {
     param([object[]]$Endpoints)
+    $identified = @($Endpoints | Where-Object { $_.PSObject.Properties['WaveInterface'] -and $_.WaveInterface -match 'vbvoicemeetervaio2023_out[1-8]_wave_' })
+    if ($identified.Count -gt 0) {
+        $main = @($identified | Where-Object { $_.Active -and $_.ParentDevice -and $_.WaveInterface -match 'vbvoicemeetervaio2023_out6_wave_' })
+        if ($main.Count -ne 1) { throw 'Expected one active Standard VAIO 6 playback endpoint.' }
+        return $main[0]
+    }
     $found = @($Endpoints | Where-Object {
         $_.Active -and $_.Name -match '^Voicemeeter Input(?:\s*\(VB-Audio Voicemeeter VAIO\))?$'
     })
     if ($found.Count -ne 1) { throw 'Expected one active Voicemeeter Input playback endpoint. Restart Windows after installation.' }
     return $found[0]
+}
+
+function Get-VoicemeeterExtraEndpoints {
+    param([object[]]$Endpoints, $Target)
+    if (-not $Target.PSObject.Properties['WaveInterface'] -or
+        $Target.WaveInterface -notmatch 'vbvoicemeetervaio2023_out6_wave_' -or -not $Target.ParentDevice) { return @() }
+    return @($Endpoints | Where-Object {
+        $_.Id -like '{0.0.0.00000000}.*' -and $_.Id -ne $Target.Id -and $_.State -eq 1 -and $_.ParentDevice -eq $Target.ParentDevice -and
+        $_.WaveInterface -match 'vbvoicemeetervaio2023_out[1-578]_wave_'
+    })
+}
+
+function Set-EndpointVisibilityState {
+    param([object[]]$Snapshot, [bool]$Visible)
+    $failures = @()
+    foreach ($endpoint in $Snapshot) {
+        try {
+            [LanAudioBridge.WindowsAudio.Endpoints]::SetVisibility($endpoint.Id, $Visible)
+            $expected = if ($Visible) { 1 } else { 2 }
+            if ([LanAudioBridge.WindowsAudio.Endpoints]::GetState($endpoint.Id) -ne $expected) { throw 'Endpoint state readback did not match' }
+        } catch { $failures += "$($endpoint.Id): $($_.Exception.Message)" }
+    }
+    if ($failures.Count) { throw ('Playback endpoint update failed: ' + ($failures -join '; ')) }
 }
 
 Export-ModuleMember -Function *-*
