@@ -32,6 +32,8 @@ The optional host-Avahi deployment runs this proxy in a separate container with 
 
 ## Notices and source availability
 
+The optional desktop receiver in `app/vban_receiver.py` is original project code under MIT, implementing the public [VBAN PCM audio specification](https://vb-audio.com/Voicemeeter/VBANProtocol_Specifications.pdf). It supports a documented subset (48 kHz, stereo, signed 16-bit PCM); it does not vendor the Linux `vban` project or distribute Voicemeeter drivers or binaries. Voicemeeter is a separately installed client with its own licence. Protocol compatibility does not imply VB-Audio certification.
+
 MiPlay includes only the pinned protocol modules and their offline simulator, not the CastFabric product server, account integrations or installer. The Docker build validates delivered source hashes and imports the receiver. Debian supplies `python3-dbus`, `python3-zeroconf`, `python3-pycryptodome` and FFmpeg; package copyright files are retained. Zeroconf is used for protocol data structures; the deployed adapter publishes through existing Avahi D-Bus and never starts its own Zeroconf socket. Modified protocol sources and notices are available verbatim inside `/app/vendor/castfabric_miplay/` and in this repository. This is an independent, experimental receiver, without a Xiaomi compatibility or certification claim.
 
 This repository's original code, scripts and documentation are licensed under the root [MIT licence](../LICENSE). Third-party code, binaries and dependencies retain their own licences and copyright notices. The root licence does not relicense the full container image. This repository publishes source and build instructions; it does not include a prebuilt container image.

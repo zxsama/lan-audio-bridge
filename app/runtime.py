@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Single-process supervisor and fail-closed PulseAudio source arbitration.
+"""Supervise receivers and arbitrate phone audio beside an independent desktop lane.
 
-Receivers never own the sound card. A single loopback is the only path from
-their private buses to output. Only uncorked sink-input edges request ownership.
+Receivers use private buses; only managed loopbacks reach the sound card.
+Uncorked phone sink-input edges request phone ownership, never desktop ownership.
 """
 from __future__ import annotations
 
 import dataclasses
 import json
+import ipaddress
 import logging
 import os
 from pathlib import Path
@@ -52,6 +53,13 @@ class Config:
     miplay_port: int = 8899
     dlna_buffer_ms: int = 1000
     output_buffer_ms: int = 200
+    desktop_enabled: bool = False
+    vban_port: int = 6980
+    vban_source_ip: str = ""
+    vban_stream_name: str = "Windows"
+    desktop_buffer_ms: int = 50
+    desktop_volume: int = 100
+    desktop_idle_ms: int = 500
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Config:
@@ -98,10 +106,25 @@ class Config:
         }
         if len({ports[source] for source in enabled}) != len(enabled):
             raise BridgeError("Enabled receiver ports must be distinct")
+        desktop = env.get("ENABLE_DESKTOP", "false").lower()
+        if desktop not in ("true", "false"):
+            raise BridgeError("ENABLE_DESKTOP must be true or false")
+        source_ip = env.get("VBAN_SOURCE_IP", "")
+        if source_ip or desktop == "true":
+            try:
+                ipaddress.IPv4Address(source_ip)
+            except ValueError:
+                raise BridgeError("VBAN_SOURCE_IP must be an IPv4 address") from None
+        stream = env.get("VBAN_STREAM_NAME", "Windows")
+        if not stream or len(stream.encode("utf-8")) > 16 or any(ord(c) < 32 for c in stream):
+            raise BridgeError("VBAN_STREAM_NAME must contain 1..16 UTF-8 bytes without control characters")
         return cls(name, mode, device, rate, number("OUTPUT_VOLUME", 100, 0, 100),
                    tuple(enabled), interface, ports["airplay"], ports["dlna"], ports["spotify"], avahi_mode,
                    ports["miplay"], number("DLNA_BUFFER_MS", 1000, 0, 5000),
-                   number("OUTPUT_BUFFER_MS", 200, 50, 1000))
+                   number("OUTPUT_BUFFER_MS", 200, 50, 1000), desktop == "true",
+                   number("VBAN_PORT", 6980, 1024, 65535), source_ip, stream,
+                   number("DESKTOP_BUFFER_MS", 50, 20, 500),
+                   number("DESKTOP_VOLUME", 100, 0, 100), number("DESKTOP_IDLE_MS", 500, 200, 5000))
 
 
 def atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
@@ -195,10 +218,15 @@ def owns_udp_ports(pid: int, required: set[int]) -> bool:
 
 def pulse_config(config: Config) -> str:
     lines = [".fail", "load-module module-native-protocol-unix socket=/run/lan-audio/pulse.sock auth-anonymous=1 auth-cookie-enabled=0"]
-    for sink in (*[source + "_bus" for source in SOURCES], "discard"):
-        lines.append(f"load-module module-null-sink sink_name={sink} rate={config.sample_rate} channels=2")
+    for sink in (*[source + "_bus" for source in SOURCES],
+                 *(["desktop_bus"] if config.desktop_enabled else []), "discard"):
+        # The desktop bus must not retain the null sink's default two-second
+        # idle scheduling window before a short notification starts playing.
+        scheduling = " norewinds=true" if config.desktop_enabled and sink in ("desktop_bus", "discard") else ""
+        lines.append(f"load-module module-null-sink sink_name={sink} rate={config.sample_rate} channels=2{scheduling}")
     if config.audio_mode == "null":
-        lines.append(f"load-module module-null-sink sink_name=output rate={config.sample_rate} channels=2")
+        scheduling = " norewinds=true" if config.desktop_enabled else ""
+        lines.append(f"load-module module-null-sink sink_name=output rate={config.sample_rate} channels=2{scheduling}")
     else:
         lines.append(f"load-module module-alsa-sink sink_name=output device={config.audio_device} rate={config.sample_rate} channels=2")
     lines += ["set-default-sink discard", "set-default-source discard.monitor", "set-sink-mute output yes",
@@ -264,7 +292,16 @@ def receiver_commands(config: Config, identity: str, address: str = "") -> dict[
         commands["dlna"] += ["--interface-name", config.interface]
         commands["spotify"] += ["--zeroconf-interface", address]
         commands["miplay"] += ["--interface", config.interface, "--address", address]
-    return {name: commands[name] for name in config.enabled}
+    selected = {name: commands[name] for name in config.enabled}
+    if config.desktop_enabled:
+        selected["desktop"] = ["python3", "/app/vban_receiver.py", "--port", str(config.vban_port),
+                               "--source-ip", config.vban_source_ip, "--stream-name", config.vban_stream_name,
+                               "--sink", "desktop_bus", "--latency-ms", "30",
+                               "--route-latency-ms", str(config.desktop_buffer_ms),
+                               "--idle-ms", str(config.desktop_idle_ms),
+                               "--state-path", "/run/lan-audio/desktop.json",
+                               "--runtime-status", "/run/lan-audio/status.json"]
+    return selected
 
 
 def child_environment(source: str | None = None) -> dict[str, str]:
@@ -311,10 +348,17 @@ class Snapshot:
 
 
 class Pulse:
-    def __init__(self, runner: Callable = subprocess.run, latency_ms: int = 200):
+    def __init__(self, runner: Callable = subprocess.run, latency_ms: int = 200,
+                 desktop_enabled: bool = False, desktop_volume: int = 100,
+                 desktop_latency_ms: int = 50):
         self.runner = runner
         self.latency_ms = latency_ms
         self.route_module: int | None = None
+        self.desktop_route_module: int | None = None
+        self.desktop_enabled = desktop_enabled
+        self.desktop_volume = desktop_volume
+        self.desktop_latency_ms = desktop_latency_ms
+        self.defer_gain_refresh = False
 
     def command(self, *arguments: str) -> str:
         try:
@@ -341,6 +385,8 @@ class Pulse:
         try:
             sinks = {int(sink["index"]): sink["name"] for sink in self.listing("sinks")}
             required = {"output", "discard", *(source + "_bus" for source in SOURCES)}
+            if self.desktop_enabled:
+                required.add("desktop_bus")
             if not required.issubset(sinks.values()):
                 raise BridgeError("Required PulseAudio sink disappeared")
             result = Snapshot({s: set() for s in SOURCES}, {s: set() for s in SOURCES})
@@ -353,7 +399,8 @@ class Pulse:
                     module = stream.get("owner_module")
                     valid_module = (type(module) is int or
                                     (isinstance(module, str) and re.fullmatch(r"[0-9]{1,10}", module)))
-                    if self.route_module is None or not valid_module or int(module) != self.route_module:
+                    allowed = {m for m in (self.route_module, self.desktop_route_module) if m is not None}
+                    if not valid_module or int(module) not in allowed:
                         raise BridgeError("Unexpected direct output stream")
                 if sink not in (source + "_bus" for source in SOURCES):
                     continue
@@ -370,6 +417,9 @@ class Pulse:
             raise BridgeError("PulseAudio stream inventory is incomplete") from None
 
     def clear(self) -> None:
+        if self.desktop_enabled:
+            self._clear_lane(False)
+            return
         # Muting first also closes the route if unload fails. The caller exits on error.
         try:
             self.command("set-sink-mute", "output", "1")
@@ -384,6 +434,9 @@ class Pulse:
     def route(self, source: str) -> None:
         if source not in SOURCES or self.route_module is not None:
             raise BridgeError("Invalid routing transition")
+        if self.desktop_enabled:
+            self._route_lane(source, False)
+            return
         try:
             self.command("set-sink-mute", "output", "1")
             # Create the loopback against an awake sink so its source side can
@@ -402,6 +455,78 @@ class Pulse:
             except BridgeError:
                 pass
             raise
+
+    def _input(self, module: int) -> int:
+        matches = [stream for stream in self.listing("sink-inputs")
+                   if str(stream.get("owner_module")) == str(module)]
+        if len(matches) != 1:
+            raise BridgeError("Routing stream disappeared or is ambiguous")
+        return int(matches[0]["index"])
+
+    def _gain(self, module: int, desktop: bool, mixing: bool) -> None:
+        gain = (self.desktop_volume / 100 if desktop else 1.0) * (0.5 if mixing else 1.0)
+        # Signed pactl dB arguments are relative changes. Use an absolute raw
+        # Pulse volume (whose cube is linear gain), so refreshes are idempotent.
+        value = str(round(65536 * gain ** (1 / 3)))
+        self.command("set-sink-input-volume", str(self._input(module)), value)
+
+    def _clear_lane(self, desktop: bool) -> None:
+        attribute = "desktop_route_module" if desktop else "route_module"
+        module = getattr(self, attribute)
+        if module is not None:
+            self.command("unload-module", str(module))
+            setattr(self, attribute, None)
+        other = self.route_module if desktop else self.desktop_route_module
+        if other is not None:
+            if not self.defer_gain_refresh:
+                self._gain(other, not desktop, False)
+        else:
+            try:
+                self.command("set-sink-mute", "output", "1")
+            finally:
+                self.command("suspend-sink", "output", "1")
+
+    def _route_lane(self, source: str, desktop: bool) -> None:
+        attribute = "desktop_route_module" if desktop else "route_module"
+        if getattr(self, attribute) is not None:
+            raise BridgeError("Invalid routing transition")
+        other = self.route_module if desktop else self.desktop_route_module
+        if other is not None:
+            self._gain(other, not desktop, True)
+        else:
+            self.command("set-sink-mute", "output", "1")
+            self.command("suspend-sink", "output", "0")
+        # Stage against discard, then apply gain before any new audio reaches output.
+        module = self.command("load-module", "module-loopback", f"source={source}_bus.monitor",
+                              "sink=discard", f"latency_msec={self.desktop_latency_ms if desktop else self.latency_ms}",
+                              "source_dont_move=true", "sink_dont_move=false", "channels=2", "remix=no")
+        if not re.fullmatch(r"[0-9]+", module):
+            raise BridgeError("PulseAudio did not return a routing module identifier")
+        setattr(self, attribute, int(module))
+        self._gain(int(module), desktop, other is not None)
+        self.command("move-sink-input", str(self._input(int(module))), "output")
+        if other is None:
+            self.command("set-sink-mute", "output", "0")
+
+    def desktop_route(self, active: bool) -> None:
+        if active and self.desktop_route_module is None:
+            self._route_lane("desktop", True)
+        elif not active and self.desktop_route_module is not None:
+            self._clear_lane(True)
+
+    def clear_all(self) -> None:
+        if not self.desktop_enabled:
+            self.clear()
+            return
+        try:
+            self.command("set-sink-mute", "output", "1")
+            for attribute in ("route_module", "desktop_route_module"):
+                module = getattr(self, attribute)
+                if module is not None:
+                    self.command("unload-module", str(module))
+                    setattr(self, attribute, None)
+        finally:
+            self.command("suspend-sink", "output", "1")
 
 
 class Coordinator:
@@ -426,7 +551,13 @@ class Coordinator:
         if winner is not None and not eligible[winner]:
             winner = None
         if winner != self.owner:
-            self.pulse.clear()
+            # A phone replacement must not briefly boost the continuing desktop
+            # lane between unloading the old phone route and attaching the new one.
+            self.pulse.defer_gain_refresh = winner is not None
+            try:
+                self.pulse.clear()
+            finally:
+                self.pulse.defer_gain_refresh = False
             old_owner = self.owner
             self.owner = None
             if winner is not None:
@@ -586,20 +717,47 @@ class Runtime:
         self.config = config
         self.stop = threading.Event()
         self.supervisor = Supervisor()
-        self.pulse = Pulse(latency_ms=config.output_buffer_ms)
+        self.pulse = Pulse(latency_ms=config.output_buffer_ms, desktop_enabled=config.desktop_enabled,
+                           desktop_volume=config.desktop_volume, desktop_latency_ms=config.desktop_buffer_ms)
         self.coordinator = Coordinator(self.pulse, self.supervisor.preempt, config.enabled)
         self.state = "starting"
         self.lock_file = None
         self.lock_acquired = False
         self.next_avahi_probe = 0.0
         self.pulse_context: ProcessContext | None = None
+        self.desktop_generation: str | None = None
+
+    def update_desktop(self, now: float) -> None:
+        if not self.config.desktop_enabled:
+            return
+        child = self.supervisor.children.get("desktop")
+        generation = None
+        try:
+            value = json.loads((RUN_DIR / "desktop.json").read_text(encoding="utf-8"))
+            if (child is not None and child.state == "running" and child.process is not None
+                    and child.process.poll() is None
+                    and type(value["receiver_pid"]) is int and value["receiver_pid"] == child.process.pid
+                    and 0 <= now - value["updated_at"] <= 2
+                    and value["active"] is True and value["enabled"] is True):
+                generation = str(uuid.UUID(value["generation"]))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
+        if generation != self.desktop_generation:
+            self.pulse.desktop_route(False)
+        self.pulse.desktop_route(generation is not None)
+        self.desktop_generation = generation
 
     def write_status(self) -> None:
         status = {"schema": 1, "pid": os.getpid(), "heartbeat_unix": time.time(), "state": self.state,
                   "owner": self.coordinator.owner, "enabled": list(self.config.enabled),
                   "avahi_mode": self.config.avahi_mode,
-                  "buffers": {"dlna_ms": self.config.dlna_buffer_ms, "output_ms": self.config.output_buffer_ms},
+                  "buffers": {"dlna_ms": self.config.dlna_buffer_ms, "output_ms": self.config.output_buffer_ms,
+                              "desktop_ms": self.config.desktop_buffer_ms},
                   "route_module": self.pulse.route_module, "children": self.supervisor.statuses()}
+        status["desktop"] = {"enabled": self.config.desktop_enabled,
+                             "active": self.pulse.desktop_route_module is not None,
+                             "generation": self.desktop_generation,
+                             "route_module": self.pulse.desktop_route_module}
         atomic_write(STATUS_PATH, json.dumps(status, separators=(",", ":")) + "\n", 0o644)
 
     def prepare(self) -> None:
@@ -637,7 +795,7 @@ class Runtime:
         atomic_write(RUN_DIR / "machine-id", persistent_machine_id(DATA_DIR) + "\n", 0o644)
         address = interface_ipv4(self.config.interface) if self.config.interface else ""
         # These paths are ephemeral and are only removed after the single-instance lock.
-        paths = [RUN_DIR / "pulse.sock", Path("/run/pulse/pid")]
+        paths = [RUN_DIR / "pulse.sock", RUN_DIR / "desktop.json", Path("/run/pulse/pid")]
         if self.config.avahi_mode == "internal":
             paths += [Path("/run/dbus/system_bus_socket"), Path("/run/avahi-daemon/pid"),
                       Path("/run/avahi-daemon/socket")]
@@ -712,10 +870,12 @@ class Runtime:
                 begin = time.monotonic()
                 self.supervisor.tick(begin)
                 self.check_discovery(begin)
+                self.update_desktop(time.time())
                 self.coordinator.step(self.pulse.snapshot(), self.supervisor.blocked_sources())
-                self.state = "playing" if self.coordinator.owner else "idle"
+                self.state = "playing" if self.coordinator.owner or self.pulse.desktop_route_module is not None else "idle"
                 self.write_status()
-                self.stop.wait(max(0, POLL_SECONDS - (time.monotonic() - begin)))
+                interval = 0.05 if self.config.desktop_enabled else POLL_SECONDS
+                self.stop.wait(max(0, interval - (time.monotonic() - begin)))
         except InterruptedError:
             pass
         except Exception as exc:
@@ -726,7 +886,7 @@ class Runtime:
             self.state = "failed" if failed else "stopping"
             if self.lock_acquired:
                 try:
-                    self.pulse.clear()
+                    self.pulse.clear_all()
                 except BridgeError:
                     pass
             self.coordinator.owner = None

@@ -1,6 +1,6 @@
 # LAN Audio Bridge
 
-基于 Docker 的局域网音频接收器，支持 AirPlay、DLNA、Spotify Connect 和实验性小米妙播。
+基于 Docker 的局域网音频接收器，支持 AirPlay、DLNA、Spotify Connect、实验性小米妙播及 VBAN 电脑音频。
 
 ## 功能
 
@@ -10,8 +10,9 @@
 | DLNA / UPnP AV | gmrender-resurrect |
 | Spotify Connect | librespot，需要 Premium 账号 |
 | 小米妙播（实验性） | MiPlay 接收器，基于 CastFabric 协议模块 |
+| VBAN | 独立电脑音频输入，可与手机音频混音 |
 
-多个接收器共用一个音频输出，新音源接管时会断开旧会话。MiPlay、专有投放功能及具体客户端的兼容范围见[协议说明](docs/miplay.md)和[部署文档](docs/deployment.md)。
+手机投放协议之间按新音源接管旧会话；可选的 VBAN 电脑输入与手机音频同时播放，并独立控制音量。MiPlay、专有投放功能及具体客户端的兼容范围见[协议说明](docs/miplay.md)和[部署文档](docs/deployment.md)。
 
 ## 部署
 
@@ -20,7 +21,7 @@
 ```sh
 git clone https://github.com/zxsama/lan-audio-bridge.git
 cd lan-audio-bridge
-docker build -t lan-audio-bridge:0.2.2 .
+docker build -t lan-audio-bridge:0.3.0 .
 cp .env.example .env
 ```
 
@@ -49,6 +50,7 @@ docker compose -f compose.yaml -f compose.host-avahi.yaml up -d
 
 - [配置与运行约定](docs/runtime.md)
 - [MiPlay 与播放缓冲](docs/miplay.md)
+- [Windows 网络音频与混音](docs/desktop-audio.md)
 - [运维与验收](docs/operations.md)
 - [开发与测试](docs/development.md)
 - [上游组件与构建来源](docs/UPSTREAM.md)

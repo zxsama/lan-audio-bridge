@@ -13,6 +13,7 @@ Dockerfile            固定上游版本的多阶段镜像构建
 compose.yaml          NAS 实际声卡部署
 compose.host-avahi.yaml 生产配置专用的宿主 Avahi override
 compose.test.yaml     隔离的 null 输出测试实例
+compose.desktop-test.yaml  独立的 VBAN 与混音测试实例
 compose.local.yaml    Windows/WSL 常驻软件演示
 .env.example          生产配置模板，不含真实目录和设备标识
 ```
@@ -36,7 +37,7 @@ python3 -B -m unittest discover -s tests -p test_runtime.py -v
 测试配置使用 bridge 网络、独立 Docker volume 和 null 输出，不映射 `/dev/snd`，不发布端口，也不会播放到真实声卡。在 Linux/WSL 项目目录构建并运行独立测试实例：
 
 ```sh
-docker build -t lan-audio-bridge:0.2.2 .
+docker build -t lan-audio-bridge:0.3.0 .
 docker compose -f compose.test.yaml config --quiet
 docker compose -f compose.test.yaml up -d --wait --wait-timeout 120
 python3 -B tests/integration.py
@@ -65,7 +66,7 @@ docker compose -f compose.test.yaml down
 构建当前镜像后，可独立执行：
 
 ```sh
-python3 -B tests/host_avahi.py --image lan-audio-bridge:0.2.2
+python3 -B tests/host_avahi.py --image lan-audio-bridge:0.3.0
 ```
 
 该脚本在临时 Docker 网络命名空间中模拟独占 5353 的 Avahi、私有 D-Bus 和独立过滤代理，使用独立资源前缀并清理测试资源；不使用真实 host network、宿主 D-Bus、声卡、账号或发布端口。应检查代理访问限制、动态服务公告与失联恢复的实际输出。本节提供运行方法，各版本的执行结果见相应验证记录；新的执行结果应单独记录。
@@ -89,3 +90,19 @@ python3 -B tests/host_avahi.py --image lan-audio-bridge:0.2.2
 0.2.1 增加 `tests/test_miplay_presence.py` 的真实 TCP 超时/状态回归，以及 `python3 tests/miplay_presence.py` 的独立容器 40 秒持续发现检查。后者仅发送认证、心跳和查询，不发送 OPEN、不播放媒体；要求已启动独立 `compose.test.yaml`，自动清理观察者。见 [0.2.1 验证](verification-0.2.1.md)。
 
 0.2.2 增加 `tests/test_miplay_volume.py` 的跨连接音量和并发等待回归，以及 `tests/miplay_volume.py` 的真实服务/输入总线一致性检查。`integration.py` 同时验证输出挂起、恢复和 70%/100% 的实际幅度差异。测试方法与结果见 [0.2.2 验证](verification-0.2.2.md)。
+
+## VBAN 与双路混音
+
+`test_vban.py` 验证 PCM 包解析、源地址与流名匹配、序列及空闲生命周期。`test_runtime.py` 同时覆盖双路路由、握手状态与增益。以下测试使用已构建的 0.3.0 镜像：
+
+```sh
+docker compose -f compose.desktop-test.yaml up -d --wait --wait-timeout 120
+docker exec lan-audio-bridge-desktop-test-audio-1 python3 /workspace/tests/desktop_audio.py --inside
+docker exec lan-audio-bridge-desktop-test-audio-1 python3 /workspace/tests/desktop_latency.py --markers 30
+docker exec lan-audio-bridge-desktop-test-audio-1 python3 /workspace/tests/desktop_recovery.py
+docker compose -f compose.desktop-test.yaml down
+```
+
+该独立配置在容器内发送 UDP VBAN 音频，并录制 `output.monitor`。验证电脑单独输出、与四手机总线混音、十二种手机切换、独立停止与音量、短提示音恢复和数字静音挂起。它不会安装 Windows 驱动或向物理设备播放。软件链路延迟与真实 Windows 到音响的端到端延迟须分别报告。
+
+0.3.0 的本机验证结果及延迟测量范围见 [0.3.0 验证](verification-0.3.0.md)。

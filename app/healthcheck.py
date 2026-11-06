@@ -24,6 +24,13 @@ def healthy(status: dict, now: float, alive=None) -> bool:
         if mode not in ("internal", "external"):
             return False
         required = {"pulse", *status["enabled"]}
+        desktop = status.get("desktop", {"enabled": False, "active": False, "route_module": None})
+        if desktop["enabled"]:
+            required.add("desktop")
+        desktop_playing = (desktop["enabled"] is True and desktop["active"] is True
+                           and type(desktop["route_module"]) is int and desktop["route_module"] >= 0)
+        if not desktop_playing and (desktop["active"] or desktop["route_module"] is not None):
+            return False
         if mode == "internal":
             required.update(("dbus", "avahi"))
         if "airplay" in status["enabled"]:
@@ -34,8 +41,10 @@ def healthy(status: dict, now: float, alive=None) -> bool:
                 return False
             alive(child["pid"])
         if status["state"] == "idle":
-            return status["owner"] is None and status["route_module"] is None
-        return status["owner"] in status["enabled"] and type(status["route_module"]) is int
+            return status["owner"] is None and status["route_module"] is None and not desktop_playing
+        phone_playing = status["owner"] in status["enabled"] and type(status["route_module"]) is int
+        phone_idle = status["owner"] is None and status["route_module"] is None
+        return phone_playing or (phone_idle and desktop_playing)
     except (KeyError, TypeError, OSError, ValueError):
         return False
 

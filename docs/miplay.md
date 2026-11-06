@@ -47,7 +47,7 @@
 使用 `compose.test.yaml` 的独立 bridge/null 输出实例，无宿主声卡和公开端口；不要向生产容器运行注入或故障测试。
 
 ```sh
-docker build -t lan-audio-bridge:0.2.2 .
+docker build -t lan-audio-bridge:0.3.0 .
 docker compose -f compose.test.yaml up -d --wait --wait-timeout 120
 python3 tests/integration.py
 python3 tests/discovery.py
@@ -59,7 +59,7 @@ python3 tests/dlna_jitter.py --format flac --label buffered
 
 ```sh
 docker run --rm --network none -v "$PWD:/workspace:ro" --entrypoint python3 \
-  lan-audio-bridge:0.2.2 -B -m unittest discover -s /workspace/tests -p 'test_*.py' -v
+  lan-audio-bridge:0.3.0 -B -m unittest discover -s /workspace/tests -p 'test_*.py' -v
 ```
 
 `tests/miplay_sender.py` 用同一固定版本的模拟发送端执行控制、RTSP 和 AAC 传输，并从真实 Pulse 输出录音。它不是手机应用，不证明独立实现之间的兼容性。执行时仅选择隔离 null 容器，目标地址为该测试容器的 bridge IPv4。
@@ -69,7 +69,7 @@ cid=$(docker compose -f compose.test.yaml ps -q audio)
 ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$cid")
 docker exec -i "$cid" python3 - --target "$ip" --source-address "$ip" --duration 4 < tests/miplay_sender.py
 docker exec -i "$cid" python3 - --target "$ip" --source-address "$ip" < tests/miplay_volume.py
-python3 tests/host_avahi.py --image lan-audio-bridge:0.2.2
+python3 tests/host_avahi.py --image lan-audio-bridge:0.3.0
 docker compose -f compose.test.yaml down
 ```
 

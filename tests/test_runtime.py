@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
@@ -430,6 +431,172 @@ class PulseTests(unittest.TestCase):
                     pulse.snapshot()
 
 
+class DualLaneTests(unittest.TestCase):
+    def setUp(self):
+        self.events = []
+        self.modules = {}
+        self.next_module = 10
+        def run(argv, **kwargs):
+            args = argv[2:]
+            self.events.append(args)
+            output = ""
+            if args[0] == "load-module":
+                self.next_module += 1
+                self.modules[self.next_module] = {"index": self.next_module + 100,
+                                                 "owner_module": str(self.next_module)}
+                output = str(self.next_module)
+            elif args[0] == "unload-module":
+                del self.modules[int(args[1])]
+            elif args[:3] == ["--format=json", "list", "sink-inputs"]:
+                output = json.dumps(list(self.modules.values()))
+            return subprocess.CompletedProcess(argv, 0, output)
+        self.pulse = Pulse(run, desktop_enabled=True)
+
+    def test_second_lane_attenuates_before_move_and_stop_restores_other(self):
+        self.pulse.route("miplay")
+        phone = self.pulse.route_module
+        self.events.clear()
+        self.pulse.desktop_route(True)
+        desktop = self.pulse.desktop_route_module
+        gain = ["set-sink-input-volume", str(phone + 100), "52016"]
+        self.assertLess(self.events.index(gain), next(i for i, e in enumerate(self.events) if e[0] == "load-module"))
+        desktop_gain = ["set-sink-input-volume", str(desktop + 100), "52016"]
+        self.assertLess(self.events.index(desktop_gain), next(i for i, e in enumerate(self.events) if e[0] == "move-sink-input"))
+        self.assertFalse(any(e[0] in ("set-sink-mute", "suspend-sink", "set-sink-volume") for e in self.events))
+        self.events.clear()
+        self.pulse.clear()
+        self.assertEqual(self.pulse.desktop_route_module, desktop)
+        self.assertIn(["set-sink-input-volume", str(desktop + 100), "65536"], self.events)
+        self.assertFalse(any(e[0] in ("set-sink-mute", "suspend-sink") for e in self.events))
+        self.pulse.desktop_route(False)
+        self.assertEqual(self.events[-1], ["suspend-sink", "output", "1"])
+
+    def test_phone_switch_does_not_stop_desktop(self):
+        self.pulse.desktop_route(True)
+        desktop = self.pulse.desktop_route_module
+        coordinator = Coordinator(self.pulse, lambda source: None)
+        coordinator.step(snapshot({"dlna": {1}}))
+        self.events.clear()
+        coordinator.step(snapshot({"dlna": {1}, "airplay": {2}}))
+        self.assertEqual(coordinator.owner, "airplay")
+        self.assertEqual(self.pulse.desktop_route_module, desktop)
+        self.assertNotIn(["unload-module", str(desktop)], self.events)
+        self.assertNotIn(["set-sink-input-volume", str(desktop + 100), "65536"], self.events)
+        self.assertFalse(any(e[0] in ("set-sink-mute", "suspend-sink") for e in self.events))
+
+    def test_desktop_stop_restores_phone_and_global_cleanup_suspends(self):
+        self.pulse.desktop_route(True)
+        self.pulse.route("airplay")
+        phone = self.pulse.route_module
+        self.events.clear()
+        self.pulse.desktop_route(False)
+        self.assertEqual(self.pulse.route_module, phone)
+        self.assertIn(["set-sink-input-volume", str(phone + 100), "65536"], self.events)
+        self.assertFalse(any(e[0] in ("set-sink-mute", "suspend-sink") for e in self.events))
+        self.pulse.desktop_route(True)
+        self.pulse.clear_all()
+        self.assertEqual(self.modules, {})
+        self.assertEqual(self.events[-1], ["suspend-sink", "output", "1"])
+
+    def test_desktop_volume_is_linear_and_zero_is_supported(self):
+        self.pulse.desktop_volume = 50
+        self.pulse.desktop_route(True)
+        index = str(self.pulse.desktop_route_module + 100)
+        self.assertIn(["set-sink-input-volume", index, "52016"], self.events)
+        self.pulse.route("dlna")
+        self.assertIn(["set-sink-input-volume", index, "41285"], self.events)
+        self.pulse.desktop_volume = 0
+        self.pulse.clear()
+        self.assertIn(["set-sink-input-volume", index, "0"], self.events)
+
+    def test_failed_staged_move_remains_tracked_for_global_cleanup(self):
+        original = self.pulse.command
+        def command(*args):
+            if args[0] == "move-sink-input":
+                raise BridgeError("move failed")
+            return original(*args)
+        with patch.object(self.pulse, "command", side_effect=command):
+            with self.assertRaises(BridgeError):
+                self.pulse.desktop_route(True)
+        self.assertIsNotNone(self.pulse.desktop_route_module)
+        self.pulse.clear_all()
+        self.assertEqual(self.modules, {})
+        self.assertEqual(self.events[-1], ["suspend-sink", "output", "1"])
+
+    def test_both_output_ids_allowed_but_desktop_not_phone_candidate(self):
+        sinks = [{"index": i, "name": name} for i, name in enumerate(
+            [*(s + "_bus" for s in SOURCES), "discard", "output", "desktop_bus"])]
+        streams = [{"index": 10, "sink": 5, "owner_module": "7"},
+                   {"index": 11, "sink": 5, "owner_module": 8},
+                   {"index": 12, "sink": 6, "corked": False}]
+        self.pulse.route_module, self.pulse.desktop_route_module = 7, 8
+        self.pulse.listing = lambda kind: sinks if kind == "sinks" else streams
+        self.assertEqual(self.pulse.snapshot(), snapshot())
+        streams.append({"index": 13, "sink": 5, "owner_module": 9})
+        with self.assertRaises(BridgeError):
+            self.pulse.snapshot()
+
+    def test_desktop_config_and_receiver_arguments(self):
+        config = Config.from_env({"AUDIO_MODE": "null", "ENABLE_DESKTOP": "true", "VBAN_SOURCE_IP": "192.0.2.4"})
+        self.assertEqual(config.enabled, SOURCES)
+        self.assertEqual(config.desktop_buffer_ms, 50)
+        self.assertIn("sink_name=desktop_bus", pulse_config(config))
+        command = receiver_commands(config, "identity")["desktop"]
+        self.assertIn("desktop_bus", command)
+        self.assertIn("--runtime-status", command)
+        self.assertNotIn("--buffer-ms", command)
+        self.assertEqual(command[command.index("--latency-ms") + 1], "30")
+        self.assertEqual(command[command.index("--route-latency-ms") + 1], "50")
+        self.assertIn("sink_name=desktop_bus rate=48000 channels=2 norewinds=true", pulse_config(config))
+        for key, value in (("VBAN_SOURCE_IP", ""), ("VBAN_SOURCE_IP", "::1"),
+                           ("VBAN_STREAM_NAME", "名" * 6), ("ENABLE_DESKTOP", "1"),
+                           ("DESKTOP_BUFFER_MS", "19"), ("DESKTOP_BUFFER_MS", "501"),
+                           ("DESKTOP_IDLE_MS", "199"), ("DESKTOP_VOLUME", "101")):
+            with self.subTest(key=key), self.assertRaises(BridgeError):
+                Config.from_env({"AUDIO_MODE": "null", "ENABLE_DESKTOP": "true", "VBAN_SOURCE_IP": "192.0.2.4", key: value})
+
+    def test_configured_desktop_buffer_controls_loopback_and_status(self):
+        runtime = Runtime(Config(audio_mode="null", desktop_enabled=True, desktop_buffer_ms=123))
+        self.assertEqual(runtime.pulse.desktop_latency_ms, 123)
+        self.pulse.desktop_latency_ms = runtime.pulse.desktop_latency_ms
+        self.pulse.desktop_route(True)
+        load = next(event for event in self.events if event[0] == "load-module")
+        self.assertIn("latency_msec=123", load)
+        with patch("runtime.atomic_write") as write:
+            runtime.write_status()
+        self.assertEqual(json.loads(write.call_args.args[1])["buffers"]["desktop_ms"], 123)
+
+    def test_handshake_requires_fresh_live_matching_process_and_clears_only_desktop(self):
+        runtime = Runtime(Config(audio_mode="null", desktop_enabled=True))
+        runtime.pulse = self.pulse
+        process = Process()
+        runtime.supervisor.children["desktop"] = Child("desktop", [], process=process, state="running")
+        generation = str(uuid.uuid4())
+        value = {"active": True, "enabled": True, "generation": generation,
+                 "receiver_pid": process.pid, "updated_at": 100}
+        with patch.object(Path, "read_text", return_value=json.dumps(value)):
+            runtime.update_desktop(100)
+        self.assertEqual(runtime.desktop_generation, generation)
+        self.assertIsNotNone(runtime.pulse.desktop_route_module)
+        runtime.pulse.route("dlna")
+        phone = runtime.pulse.route_module
+        self.events.clear()
+        with patch.object(Path, "read_text", return_value=json.dumps(value)):
+            runtime.update_desktop(103)
+        self.assertIsNone(runtime.desktop_generation)
+        self.assertIsNone(runtime.pulse.desktop_route_module)
+        self.assertEqual(runtime.pulse.route_module, phone)
+        self.assertFalse(any(e[0] in ("set-sink-mute", "suspend-sink") for e in self.events))
+        for change in ({"receiver_pid": process.pid + 1}, {"updated_at": 101}, {"generation": "bad"}):
+            with patch.object(Path, "read_text", return_value=json.dumps(value | change)):
+                runtime.update_desktop(100)
+            self.assertIsNone(runtime.pulse.desktop_route_module)
+        process.returncode = 1
+        with patch.object(Path, "read_text", return_value=json.dumps(value)):
+            runtime.update_desktop(100)
+        self.assertIsNone(runtime.pulse.desktop_route_module)
+
+
 class Process:
     counter = 100
     def __init__(self):
@@ -538,6 +705,17 @@ class SupervisorTests(unittest.TestCase):
 
 
 class HealthTests(unittest.TestCase):
+    def test_desktop_only_playing_and_receiver_failure(self):
+        status = self.status()
+        status.update(state="playing", desktop={"enabled": True, "active": True, "route_module": 8})
+        status["children"]["desktop"] = {"state": "running", "pid": 20}
+        self.assertTrue(healthy(status, 101, lambda pid: None))
+        status["children"]["desktop"]["state"] = "backoff"
+        self.assertFalse(healthy(status, 101, lambda pid: None))
+        status["children"]["desktop"]["state"] = "running"
+        status["desktop"]["route_module"] = None
+        self.assertFalse(healthy(status, 101, lambda pid: None))
+
     def status(self):
         return {"pid": 1, "heartbeat_unix": 100, "state": "idle", "owner": None,
                 "route_module": None, "enabled": ["dlna"], "children": {

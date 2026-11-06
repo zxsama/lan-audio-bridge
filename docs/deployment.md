@@ -17,12 +17,12 @@
 
 ## 构建与 CLI 部署
 
-以下命令在 Linux 项目目录执行。构建镜像需要下载上游依赖，生成本地镜像 `lan-audio-bridge:0.2.2`。项目未发布公共容器镜像。
+以下命令在 Linux 项目目录执行。构建镜像需要下载上游依赖，生成本地镜像 `lan-audio-bridge:0.3.0`。项目未发布公共容器镜像。
 
 ```sh
 git clone https://github.com/zxsama/lan-audio-bridge.git
 cd lan-audio-bridge
-docker build --tag lan-audio-bridge:0.2.2 .
+docker build --tag lan-audio-bridge:0.3.0 .
 cp .env.example .env
 ```
 
@@ -35,7 +35,7 @@ AUDIO_DEVICE=plughw:CARD=YourCard,DEV=0
 
 路径和 `YourCard` 均为示例，须替换为实际值。部署前创建并确认专用数据目录，用于保存设备身份、Spotify 缓存及授权状态。Compose 使用必填变量与 `create_host_path: false`，路径缺失时拒绝启动。不要将共享资料目录或数据池根目录挂载为 `/data`。
 
-可选参数也有严格校验：`DEVICE_NAME` 最多 50 个 UTF-8 字节，只接受字母、数字、空格及 `._-()`；`NETWORK_INTERFACE` 如果指定，必须在容器内存在且带 IPv4 地址。`SAMPLE_RATE` 只接受 44100、48000、88200、96000、176400、192000，实际还需声卡支持；`OUTPUT_VOLUME` 为 0–100。四个 `ENABLE_*` 可分别设为 `false`，关闭对应接收器。
+可选参数也有严格校验：`DEVICE_NAME` 最多 50 个 UTF-8 字节，只接受字母、数字、空格及 `._-()`；`NETWORK_INTERFACE` 如果指定，必须在容器内存在且带 IPv4 地址。`SAMPLE_RATE` 只接受 44100、48000、88200、96000、176400、192000，实际还需声卡支持；`OUTPUT_VOLUME` 为 0–100。四个手机协议的 `ENABLE_*` 可分别设为 `false`，关闭对应接收器。可选的 `ENABLE_DESKTOP=true` 启用 VBAN 电脑混音输入，并要求填写 `VBAN_SOURCE_IP`；Windows 设置与参数见[电脑音频说明](desktop-audio.md)。
 
 0.2.2 的 `OUTPUT_VOLUME` 默认值为 100（0 dB），旧配置中的显式音量值继续生效。升级时如需取消原有公共输出衰减，应同时更新该参数。
 
@@ -54,7 +54,7 @@ docker compose logs --tail=100 audio
 
 仓库发布源码与部署文件，不包含预构建镜像或本地 `dist/` 归档。请先按上节构建镜像，再部署或导出。
 
-先确保 NAS 本地 Docker 中已有镜像。如果在另一台 Linux amd64 机器构建，可执行 `docker save -o lan-audio-bridge-0.2.2.tar lan-audio-bridge:0.2.2`，自行传输到 NAS，再执行 `docker load -i lan-audio-bridge-0.2.2.tar`。项目脚本不会自动远程操作 NAS。
+先确保 NAS 本地 Docker 中已有镜像。如果在另一台 Linux amd64 机器构建，可执行 `docker save -o lan-audio-bridge-0.3.0.tar lan-audio-bridge:0.3.0`，自行传输到 NAS，再执行 `docker load -i lan-audio-bridge-0.3.0.tar`。项目脚本不会自动远程操作 NAS。
 
 填写 `.env` 后在 NAS 项目目录运行：
 
