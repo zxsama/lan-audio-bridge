@@ -106,3 +106,14 @@ docker compose -f compose.desktop-test.yaml down
 该独立配置在容器内发送 UDP VBAN 音频，并录制 `output.monitor`。验证电脑单独输出、与四手机总线混音、十二种手机切换、独立停止与音量、短提示音恢复和数字静音挂起。它不会安装 Windows 驱动或向物理设备播放。软件链路延迟与真实 Windows 到音响的端到端延迟须分别报告。
 
 0.3.0 的本机验证结果及延迟测量范围见 [0.3.0 验证](verification-0.3.0.md)。
+
+## Windows 配置脚本
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows-audio.Tests.ps1
+pwsh -NoProfile -File tests/windows-audio.Tests.ps1
+```
+
+测试使用模拟 Remote API 检查参数、槽位、读回失败及恢复相关逻辑，不安装驱动、不切换真实设备、不写登录启动项。安装包 SHA256 与签名可单独验证，不能代替真实安装、重启续配和 Windows 到接收端的播放验收。`Plan` 与 `Status` 可用于不改变音频路由的本机检查。
+
+2026-11-06 在 Windows PowerShell 5.1 和 PowerShell 7 中各通过 38 项测试，包括隔离执行生产脚本的安装、重启门禁及配置事务。官方 1.1.3.0 安装包的 SHA256、发布者签名和归档结构已验证；C# 互操作编译、真实端点枚举和默认设备接口查询通过，检查前后默认播放设备与启动项一致。未执行真实驱动安装、重启续配或改变默认设备，尚未完成 Voicemeeter 到实际接收设备的播放和延迟验收。

@@ -32,7 +32,11 @@ DESKTOP_IDLE_MS=500
 
 ## Windows 设置
 
-使用 [Voicemeeter Standard](https://vb-audio.com/Voicemeeter/) 提供 Windows 虚拟播放设备。安装需要管理员权限及重启，客户端不随本项目镜像分发。
+双击仓库根目录的 [`Setup-Windows-Audio.cmd`](../Setup-Windows-Audio.cmd)，输入 NAS 的 IPv4 地址。脚本自动安装并配置 [Voicemeeter Standard](https://vb-audio.com/Voicemeeter/)，将 Windows 默认播放设备切换到虚拟输入，并配置登录启动。首次安装需要管理员确认和一次 Windows 重启；脚本会在重启登录后继续配置，不自动重启电脑。
+
+脚本适用于 Windows x64、Windows PowerShell 5.1 或 PowerShell 7。安装包固定为官方 1.1.3.0，并验证归档、安装程序 SHA256 和发布者签名。状态检查、恢复及完整行为见 [Windows 配置脚本](windows-setup.md)。已有 Banana / Potato 会话不会被自动切换。
+
+也可手动设置：
 
 1. Windows 系统或目标应用的输出设备选择 `Voicemeeter Input (VB-Audio Voicemeeter VAIO)`。
 2. 在 Virtual Input 条带打开 **B**、关闭 **A**，确保条带和 BUS B 未静音。
@@ -40,7 +44,7 @@ DESKTOP_IDLE_MS=500
 4. 打开 VBAN，在 Outgoing Stream 中选择 `BUS B`，填 NAS 地址、端口 `6980` 和流名 `Windows`，设置 `48000 Hz / 2 channels / PCM 16 bits`。
 5. 开启该发送行和 VBAN 总开关。其他格式、名称或源地址与接收配置不符时不会播放。
 
-Standard 的总线名称是 BUS B；Windows 的 `Voicemeeter Out B1` 是录音端点，不能替代上述播放设备。配置依据见[官方手册第 48 页](https://vb-audio.com/Voicemeeter/Voicemeeter_UserManual.pdf#page=48)和[内部时钟说明](https://vb-audio.com/Voicemeeter/Voicemeeter_UserManual.pdf#page=80)。Voicemeeter 使用其自身的 Donationware 授权。
+Standard 的总线名称是 BUS B；Windows 的 `Voicemeeter Out B1` 是录音端点，不能替代上述播放设备。配置与内部时钟行为依据[官方手册](https://vb-audio.com/Voicemeeter/Voicemeeter_UserManual.pdf)。Voicemeeter 使用其自身的 Donationware 授权。
 
 ## 混音与空闲行为
 

@@ -26,9 +26,13 @@ LAN Audio Bridge 的自有代码、脚本和文档采用根目录的 [MIT 许可
 
 Shairport Sync 的 `LICENSES` 包含主许可证和组件索引，并非所有组件许可证全文的合集。完整组件声明可在随镜像附带的对应源码归档中查阅，例如 `tinyhttp/LICENSE` 及相关源文件头部。
 
-## 测试依赖
+## Windows 客户端
 
-VBAN 接收器为依据[公开 PCM 协议规范](https://vb-audio.com/Voicemeeter/VBANProtocol_Specifications.pdf)编写的项目自有代码，采用 MIT 许可证。镜像不包含 Voicemeeter 客户端、驱动或 Linux `vban` 项目的源码；Windows 客户端由用户单独安装并遵守其授权条款。
+VBAN 接收器为依据[公开 PCM 协议规范](https://vb-audio.com/Voicemeeter/VBANProtocol_Specifications.pdf)编写的项目自有代码，采用 MIT 许可证。镜像不包含 Voicemeeter 客户端、驱动或 Linux `vban` 项目的源码。
+
+Windows 配置脚本从 [VB-Audio 官方来源](https://voicemeeter.com/)下载 Voicemeeter Standard 1.1.3.0，校验固定 SHA256 和发布者签名后调用官方安装程序及 Remote API。仓库不分发其二进制文件。Voicemeeter 采用 Donationware 授权，欢迎捐赠或购买许可证支持 VB-Audio；专业使用及分发须遵守其[授权说明](https://vb-audio.com/Services/licensing.htm)。该软件与驱动不适用本项目的 MIT 许可证。
+
+## 测试依赖
 
 AirPlay 发送测试在临时测试环境中安装 [pyatv 0.18.0（MIT）](https://github.com/postlund/pyatv/blob/v0.18.0/LICENSE.md)和 [srptools 1.0.1（BSD-3-Clause）](https://github.com/idlesign/srptools/blob/v1.0.1/LICENSE)。它们未由应用 Dockerfile 安装到最终运行镜像；其传递依赖同样保留各自许可。
 
