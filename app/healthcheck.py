@@ -28,8 +28,18 @@ def healthy(status: dict, now: float, alive=None) -> bool:
         desktop = status.get("desktop", {"enabled": False, "active": False, "route_module": None})
         if desktop["enabled"]:
             required.add("desktop")
-        desktop_playing = (desktop["enabled"] is True and desktop["active"] is True
-                           and type(desktop["route_module"]) is int and desktop["route_module"] >= 0)
+        backend = desktop.get("backend", "python")
+        if backend not in ("python", "native"):
+            return False
+        if backend == "native" and desktop["enabled"]:
+            index = desktop.get("sink_input")
+            if (desktop.get("ready") is not True or type(index) is not int
+                    or not 0 <= index < 0xffffffff or desktop["route_module"] is not None):
+                return False
+            desktop_playing = desktop["active"] is True
+        else:
+            desktop_playing = (desktop["enabled"] is True and desktop["active"] is True
+                               and type(desktop["route_module"]) is int and desktop["route_module"] >= 0)
         if not desktop_playing and (desktop["active"] or desktop["route_module"] is not None):
             return False
         if mode == "internal":

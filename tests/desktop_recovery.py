@@ -19,7 +19,8 @@ def main():
     try:
         eventually(lambda: routes("dlna", True), "initial mixed routes")
         time.sleep(2.2)
-        for kind in ("receiver", "player"):
+        native = status()["desktop"].get("backend") == "native"
+        for kind in (("receiver",) if native else ("receiver", "player")):
             old_pid = receiver_pid()
             phone_route = status()["route_module"]
             phone_pid = status()["children"]["dlna"]["pid"]

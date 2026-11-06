@@ -4,6 +4,8 @@
 !THIRD_PARTY_NOTICES.md
 !app/
 !app/**
+!native/
+!native/vban_pulse.c
 !scripts/
 !scripts/probe-host.sh
 !scripts/status.sh

@@ -32,7 +32,7 @@ The optional host-Avahi deployment runs this proxy in a separate container with 
 
 ## Notices and source availability
 
-The optional desktop receiver in `app/vban_receiver.py` is original project code under MIT, implementing the public [VBAN PCM audio specification](https://vb-audio.com/Voicemeeter/VBANProtocol_Specifications.pdf). It supports a documented subset (48 kHz, stereo, signed 16-bit PCM); it does not vendor the Linux `vban` project or distribute Voicemeeter drivers or binaries. Voicemeeter is a separately installed client with its own licence. Protocol compatibility does not imply VB-Audio certification.
+The optional desktop receivers in `app/vban_receiver.py` and `native/vban_pulse.c` are original project code under MIT, implementing the public [VBAN PCM audio specification](https://vb-audio.com/Voicemeeter/VBANProtocol_Specifications.pdf). They support a documented subset (48 kHz, stereo, signed 16-bit PCM); they do not vendor the Linux `vban` project or distribute Voicemeeter drivers or binaries. The native helper dynamically links Debian's `libpulse`; that library retains its own package licence and copyright notices. Voicemeeter is a separately installed client with its own licence. Protocol compatibility does not imply VB-Audio certification.
 
 MiPlay includes only the pinned protocol modules and their offline simulator, not the CastFabric product server, account integrations or installer. The Docker build validates delivered source hashes and imports the receiver. Debian supplies `python3-dbus`, `python3-zeroconf`, `python3-pycryptodome` and FFmpeg; package copyright files are retained. Zeroconf is used for protocol data structures; the deployed adapter publishes through existing Avahi D-Bus and never starts its own Zeroconf socket. Modified protocol sources and notices are available verbatim inside `/app/vendor/castfabric_miplay/` and in this repository. This is an independent, experimental receiver, without a Xiaomi compatibility or certification claim.
 
@@ -48,7 +48,7 @@ Shairport Sync and librespot are independent implementations. This project does 
 
 ## Build checks
 
-The `base` target builds all native binaries and runtime dependencies without requiring application files. Its build fails unless Shairport reports AirPlay 2 and PulseAudio, librespot exposes the PulseAudio backend, nqptp and gmrender run their version commands, and GStreamer provides `pulsesink` and HTTP input. The `final` target adds the supervisor, scripts and this provenance record.
+The `base` target builds the upstream binaries and runtime dependencies without requiring application files. Its build fails unless Shairport reports AirPlay 2 and PulseAudio, librespot exposes the PulseAudio backend, nqptp and gmrender run their version commands, and GStreamer provides `pulsesink` and HTTP input. The separate `desktop-build` target compiles the project's native receiver with C11 and warnings treated as errors. The `final` target adds that helper, the supervisor, scripts and this provenance record.
 
 ```sh
 docker build --target base -t lan-audio-bridge:base .

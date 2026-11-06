@@ -46,6 +46,12 @@ RUN mkdir -p /out/share/doc/lan-audio-bridge/upstream /out/share/lan-audio-bridg
     && cp /sources/*.tar.gz /out/share/lan-audio-bridge/sources/ \
     && strip /out/bin/*
 
+FROM build AS desktop-build
+COPY native/vban_pulse.c /sources/lan-audio-bridge/vban_pulse.c
+RUN cc -O2 -Wall -Wextra -Werror -std=c11 /sources/lan-audio-bridge/vban_pulse.c \
+       -o /out/bin/vban-pulse $(pkg-config --cflags --libs libpulse) -lm \
+    && strip /out/bin/vban-pulse
+
 FROM ${DEBIAN_IMAGE} AS base
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates python3 pulseaudio pulseaudio-utils alsa-utils \
@@ -84,6 +90,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends xdg-dbus-proxy 
     && dpkg-query -W > /usr/local/share/doc/lan-audio-bridge/debian-packages.txt \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
+COPY --from=desktop-build /out/bin/vban-pulse /usr/local/bin/vban-pulse
 COPY app/ /app/
 RUN python3 -c 'import dbus, zeroconf; from vendor.castfabric_miplay.receiver import MiPlayReceiver; import hashlib, json, pathlib; p = pathlib.Path("/app/vendor/castfabric_miplay"); m = json.loads((p / "SOURCE.json").read_text()); assert all(hashlib.sha256((p / n).read_bytes()).hexdigest() == v["sha256"] for n, v in m["files"].items())' \
     && gst-inspect-1.0 queue >/dev/null && ffmpeg -version >/dev/null

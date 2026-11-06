@@ -1,7 +1,7 @@
 name: lan-audio-bridge
 services:
   audio:
-    image: lan-audio-bridge:0.3.1
+    image: lan-audio-bridge:0.4.0
     pull_policy: never
     network_mode: host
     init: true
@@ -30,6 +30,9 @@ services:
       DESKTOP_BUFFER_MS: ${DESKTOP_BUFFER_MS:-50}
       DESKTOP_PLAYER_MS: ${DESKTOP_PLAYER_MS:-30}
       DESKTOP_JITTER_MS: ${DESKTOP_JITTER_MS:-20}
+      DESKTOP_BACKEND: ${DESKTOP_BACKEND:-python}
+      DESKTOP_NATIVE_LATENCY_MS: ${DESKTOP_NATIVE_LATENCY_MS:-16}
+      DESKTOP_NATIVE_JITTER_MS: ${DESKTOP_NATIVE_JITTER_MS:-8}
       DESKTOP_VOLUME: ${DESKTOP_VOLUME:-100}
       DESKTOP_IDLE_MS: ${DESKTOP_IDLE_MS:-500}
       DLNA_BUFFER_MS: ${DLNA_BUFFER_MS:-1000}

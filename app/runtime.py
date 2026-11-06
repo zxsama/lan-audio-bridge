@@ -24,6 +24,9 @@ import time
 import uuid
 from typing import Callable, Mapping
 
+from native_desktop import NativeDesktopMixin
+from native_control import remove_stale_socket
+
 LOG = logging.getLogger("lan-audio")
 SOURCES = ("airplay", "dlna", "spotify", "miplay")  # First wins simultaneous activation.
 RUN_DIR = Path("/run/lan-audio")
@@ -62,6 +65,9 @@ class Config:
     desktop_idle_ms: int = 500
     desktop_player_ms: int = 30
     desktop_jitter_ms: int = 20
+    desktop_backend: str = "python"
+    desktop_native_latency_ms: int = 16
+    desktop_native_jitter_ms: int = 8
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Config:
@@ -120,6 +126,9 @@ class Config:
         stream = env.get("VBAN_STREAM_NAME", "Windows")
         if not stream or len(stream.encode("utf-8")) > 16 or any(ord(c) < 32 for c in stream):
             raise BridgeError("VBAN_STREAM_NAME must contain 1..16 UTF-8 bytes without control characters")
+        backend = env.get("DESKTOP_BACKEND", "python")
+        if backend not in ("python", "native"):
+            raise BridgeError("DESKTOP_BACKEND must be python or native")
         return cls(name, mode, device, rate, number("OUTPUT_VOLUME", 100, 0, 100),
                    tuple(enabled), interface, ports["airplay"], ports["dlna"], ports["spotify"], avahi_mode,
                    ports["miplay"], number("DLNA_BUFFER_MS", 1000, 0, 5000),
@@ -127,7 +136,9 @@ class Config:
                    number("VBAN_PORT", 6980, 1024, 65535), source_ip, stream,
                    number("DESKTOP_BUFFER_MS", 50, 20, 500),
                    number("DESKTOP_VOLUME", 100, 0, 100), number("DESKTOP_IDLE_MS", 500, 200, 5000),
-                   number("DESKTOP_PLAYER_MS", 30, 5, 200), number("DESKTOP_JITTER_MS", 20, 5, 200))
+                   number("DESKTOP_PLAYER_MS", 30, 5, 200), number("DESKTOP_JITTER_MS", 20, 5, 200),
+                   backend, number("DESKTOP_NATIVE_LATENCY_MS", 16, 4, 30),
+                   number("DESKTOP_NATIVE_JITTER_MS", 8, 1, 20))
 
 
 def atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
@@ -222,7 +233,7 @@ def owns_udp_ports(pid: int, required: set[int]) -> bool:
 def pulse_config(config: Config) -> str:
     lines = [".fail", "load-module module-native-protocol-unix socket=/run/lan-audio/pulse.sock auth-anonymous=1 auth-cookie-enabled=0"]
     for sink in (*[source + "_bus" for source in SOURCES],
-                 *(["desktop_bus"] if config.desktop_enabled else []), "discard"):
+                 *(["desktop_bus"] if config.desktop_enabled and config.desktop_backend == "python" else []), "discard"):
         # The desktop bus must not retain the null sink's default two-second
         # idle scheduling window before a short notification starts playing.
         scheduling = " norewinds=true" if config.desktop_enabled and sink in ("desktop_bus", "discard") else ""
@@ -305,6 +316,15 @@ def receiver_commands(config: Config, identity: str, address: str = "") -> dict[
                                "--idle-ms", str(config.desktop_idle_ms),
                                "--state-path", "/run/lan-audio/desktop.json",
                                "--runtime-status", "/run/lan-audio/status.json"]
+        if config.desktop_backend == "native":
+            selected["desktop"] = ["vban-pulse", "--port", str(config.vban_port),
+                                   "--source-ip", config.vban_source_ip,
+                                   "--stream-name", config.vban_stream_name, "--sink", "output",
+                                   "--latency-ms", str(config.desktop_native_latency_ms),
+                                   "--jitter-ms", str(config.desktop_native_jitter_ms),
+                                   "--idle-ms", str(config.desktop_idle_ms),
+                                   "--gain", str(config.desktop_volume / 100), "--managed",
+                                   "--control", "/run/lan-audio/desktop-control.sock"]
     return selected
 
 
@@ -364,6 +384,20 @@ class Pulse:
         self.desktop_latency_ms = desktop_latency_ms
         self.defer_gain_refresh = False
 
+    @property
+    def desktop_active(self) -> bool:
+        return self.desktop_route_module is not None
+
+    def _required_desktop_sinks(self) -> set[str]:
+        return {"desktop_bus"} if self.desktop_enabled else set()
+
+    def _allowed_output_stream(self, stream: dict) -> bool:
+        module = stream.get("owner_module")
+        valid = (type(module) is int or
+                 (isinstance(module, str) and re.fullmatch(r"[0-9]{1,10}", module)))
+        allowed = {m for m in (self.route_module, self.desktop_route_module) if m is not None}
+        return bool(valid and int(module) in allowed)
+
     def command(self, *arguments: str) -> str:
         try:
             result = self.runner(["pactl", "--server=" + PULSE_SERVER, *arguments],
@@ -389,8 +423,7 @@ class Pulse:
         try:
             sinks = {int(sink["index"]): sink["name"] for sink in self.listing("sinks")}
             required = {"output", "discard", *(source + "_bus" for source in SOURCES)}
-            if self.desktop_enabled:
-                required.add("desktop_bus")
+            required.update(self._required_desktop_sinks())
             if not required.issubset(sinks.values()):
                 raise BridgeError("Required PulseAudio sink disappeared")
             result = Snapshot({s: set() for s in SOURCES}, {s: set() for s in SOURCES})
@@ -400,11 +433,7 @@ class Pulse:
                     # PulseAudio 17 encodes owner_module as a decimal string even
                     # though index and sink are JSON numbers. Accept either exact
                     # integer representation, never null, bool, float or garbage.
-                    module = stream.get("owner_module")
-                    valid_module = (type(module) is int or
-                                    (isinstance(module, str) and re.fullmatch(r"[0-9]{1,10}", module)))
-                    allowed = {m for m in (self.route_module, self.desktop_route_module) if m is not None}
-                    if not valid_module or int(module) not in allowed:
+                    if not self._allowed_output_stream(stream):
                         raise BridgeError("Unexpected direct output stream")
                 if sink not in (source + "_bus" for source in SOURCES):
                     continue
@@ -533,6 +562,10 @@ class Pulse:
             self.command("suspend-sink", "output", "1")
 
 
+class NativePulse(NativeDesktopMixin, Pulse):
+    """Direct desktop input with the existing phone arbitration policy."""
+
+
 class Coordinator:
     def __init__(self, pulse: Pulse, preempt: Callable[[str], None], enabled: tuple[str, ...] = SOURCES):
         self.pulse = pulse
@@ -615,6 +648,10 @@ class Supervisor:
 
     def start(self, child: Child, now: float) -> None:
         try:
+            if child.name == "desktop" and child.argv[0] == "vban-pulse":
+                if child.process is not None:
+                    raise BridgeError("Native desktop process must exit before restart")
+                remove_stale_socket(RUN_DIR / "desktop-control.sock")
             context = child.context
             credentials = ({"user": context.user, "group": context.group,
                             "extra_groups": context.extra_groups} if context else {})
@@ -721,8 +758,11 @@ class Runtime:
         self.config = config
         self.stop = threading.Event()
         self.supervisor = Supervisor()
-        self.pulse = Pulse(latency_ms=config.output_buffer_ms, desktop_enabled=config.desktop_enabled,
-                           desktop_volume=config.desktop_volume, desktop_latency_ms=config.desktop_buffer_ms)
+        pulse_type = NativePulse if config.desktop_enabled and config.desktop_backend == "native" else Pulse
+        self.pulse = pulse_type(latency_ms=config.output_buffer_ms, desktop_enabled=config.desktop_enabled,
+                               desktop_volume=config.desktop_volume, desktop_latency_ms=config.desktop_buffer_ms)
+        if isinstance(self.pulse, NativePulse):
+            self.pulse.on_native_failure = lambda: self.supervisor.preempt("desktop")
         self.coordinator = Coordinator(self.pulse, self.supervisor.preempt, config.enabled)
         self.state = "starting"
         self.lock_file = None
@@ -735,6 +775,11 @@ class Runtime:
         if not self.config.desktop_enabled:
             return
         child = self.supervisor.children.get("desktop")
+        if isinstance(self.pulse, NativePulse):
+            pid = (child.process.pid if child is not None and child.process is not None
+                   and child.process.poll() is None else None)
+            self.pulse.refresh_native(pid)
+            return
         generation = None
         try:
             value = json.loads((RUN_DIR / "desktop.json").read_text(encoding="utf-8"))
@@ -763,12 +808,18 @@ class Runtime:
                   "buffers": {"dlna_ms": self.config.dlna_buffer_ms, "output_ms": self.config.output_buffer_ms,
                               "desktop_ms": self.config.desktop_buffer_ms,
                               "desktop_player_ms": self.config.desktop_player_ms,
-                              "desktop_jitter_ms": self.config.desktop_jitter_ms},
+                              "desktop_jitter_ms": self.config.desktop_jitter_ms,
+                              "desktop_native_latency_ms": self.config.desktop_native_latency_ms,
+                              "desktop_native_jitter_ms": self.config.desktop_native_jitter_ms},
                   "route_module": self.pulse.route_module, "children": self.supervisor.statuses()}
         status["desktop"] = {"enabled": self.config.desktop_enabled,
-                             "active": self.pulse.desktop_route_module is not None,
+                             "active": self.pulse.desktop_active,
+                             "backend": self.config.desktop_backend,
                              "generation": self.desktop_generation,
                              "route_module": self.pulse.desktop_route_module}
+        if isinstance(self.pulse, NativePulse):
+            status["desktop"].update(ready=self.pulse.native_ready, sink_input=self.pulse.native_input,
+                                     receiver=self.pulse.native_status)
         atomic_write(STATUS_PATH, json.dumps(status, separators=(",", ":")) + "\n", 0o644)
 
     def prepare(self) -> None:
@@ -806,7 +857,8 @@ class Runtime:
         atomic_write(RUN_DIR / "machine-id", persistent_machine_id(DATA_DIR) + "\n", 0o644)
         address = interface_ipv4(self.config.interface) if self.config.interface else ""
         # These paths are ephemeral and are only removed after the single-instance lock.
-        paths = [RUN_DIR / "pulse.sock", RUN_DIR / "desktop.json", Path("/run/pulse/pid")]
+        paths = [RUN_DIR / "pulse.sock", RUN_DIR / "desktop.json", RUN_DIR / "desktop-control.sock",
+                 Path("/run/pulse/pid")]
         if self.config.avahi_mode == "internal":
             paths += [Path("/run/dbus/system_bus_socket"), Path("/run/avahi-daemon/pid"),
                       Path("/run/avahi-daemon/socket")]
@@ -856,6 +908,7 @@ class Runtime:
         self.supervisor.add("pulse", ["dbus-run-session", "--", "pulseaudio", "--daemonize=no", "--disallow-exit",
                                       "--exit-idle-time=-1", "--use-pid-file=no", "--log-target=stderr",
                                       "--log-level=notice", "--realtime=no", "--high-priority=no",
+                                      *(["--resample-method=speex-float-5"] if isinstance(self.pulse, NativePulse) else []),
                                       "--disable-shm=yes", "-n", "--file=/run/lan-audio/pulse.pa"],
                             core=True, context=self.pulse_context)
         self.wait_ready(lambda: bool(self.pulse.snapshot()))
@@ -883,7 +936,7 @@ class Runtime:
                 self.check_discovery(begin)
                 self.update_desktop(time.time())
                 self.coordinator.step(self.pulse.snapshot(), self.supervisor.blocked_sources())
-                self.state = "playing" if self.coordinator.owner or self.pulse.desktop_route_module is not None else "idle"
+                self.state = "playing" if self.coordinator.owner or self.pulse.desktop_active else "idle"
                 self.write_status()
                 interval = 0.05 if self.config.desktop_enabled else POLL_SECONDS
                 self.stop.wait(max(0, interval - (time.monotonic() - begin)))

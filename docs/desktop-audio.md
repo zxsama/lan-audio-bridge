@@ -56,7 +56,7 @@ Standard 的总线名称是 BUS B；Windows 的 `Voicemeeter Out B1` 是录音�
 
 单路播放保持原有增益；两路同时播放时，各路自动预留约 6.02 dB 的混音余量，降低满幅叠加造成的削顶。公共 `OUTPUT_VOLUME` 仍是总输出音量。电脑音量可由 Windows、Voicemeeter 或 `DESKTOP_VOLUME` 调整。
 
-接收端在首次有效声音到达时请求桌面路由，并等待路由就绪后提交音频，以保留短提示音。连续全零样本或断流达到空闲等待时间并等待下游缓冲排空后释放电脑播放器；低音量但非零的声音不会因门限检测被裁掉。双方都停止后才挂起公共输出，任一方恢复即唤醒。持续非零噪声会保持电脑输入活动。
+默认 Python 后端在首次有效声音到达时请求桌面路由，并等待路由就绪后提交音频，以保留短提示音；原生后端复用预先建立的暂停流。连续全零样本或断流达到空闲等待时间后，等待下游缓冲排空，再释放播放器或暂停原生流；低音量但非零的声音不会因门限检测被裁掉。双方都停止后才挂起公共输出，任一方恢复即唤醒。持续非零噪声会保持电脑输入活动。
 
 ## 延迟与验证
 
@@ -67,3 +67,19 @@ Standard 的总线名称是 BUS B；Windows 的 `Voicemeeter Out B1` 是录音�
 接收端保留采样期限并限制每次追赶的工作量，防止短调度停顿持续累积为播放延迟。内部心跳使用同一主机的单调时钟，系统校时不会被误判为接收器失联。音频仍为 48 kHz / PCM16，不通过升采样率或标称位深声称提高源音质。
 
 软件验证在独立容器中发送 VBAN PCM，并从 PulseAudio 输出监视器录制，检查混音、切换、独立音量、静音释放和恢复。Windows 驱动与实际设备仍需按上述配置完成现场验收。复现命令见[开发文档](development.md)。
+
+## 原生低延迟后端
+
+`DESKTOP_BACKEND=native` 启用原生 VBAN 接收器，直接写入公共 PulseAudio 输出。该路径移除电脑输入的 `pacat`、虚拟总线和 loopback，保留手机仲裁、独立音量、混音余量与空闲挂起。默认后端仍为 `python`。
+
+```dotenv
+DESKTOP_BACKEND=native
+DESKTOP_NATIVE_LATENCY_MS=16
+DESKTOP_NATIVE_JITTER_MS=8
+```
+
+原生模式不使用 `DESKTOP_BUFFER_MS`、`DESKTOP_PLAYER_MS` 和 `DESKTOP_JITTER_MS`。`DESKTOP_NATIVE_LATENCY_MS` 请求 PulseAudio 的总体播放延迟，范围 4–30 ms；`DESKTOP_NATIVE_JITTER_MS` 控制初始积累和有限重排等待，范围 1–20 ms。两者都不是端到端延迟承诺，必须检查服务器实际协商结果。
+
+原生模式下 PulseAudio 使用 `speex-float-5` 重采样，其滤波参数较 Q1 保留更宽的通带，参见 [SpeexDSP 实现](https://github.com/xiph/speexdsp/blob/master/libspeexdsp/resample.c)。传输格式仍为 48 kHz / PCM16；该设置不增加源音频的有效位深，也不代表免除实际音质与延迟验收。
+
+原生后端目前为实验功能。16/8 ms 已通过本机隔离环境中 ±200 ppm 发送时钟偏差的两组 120 秒严格测试；更小的 8/4 和 12/6 ms 配置出现过欠载，不能作为稳定配置推荐。设备要求更大缓冲时，控制目标按实际协商结果提高，状态会报告真实目标。Windows 发送、实际音频设备、长期时钟偏差及目标主机负载仍需单独验收。测量结果和边界见[延迟验证](latency.md)，控制协议见[原生接收器](../native/README.md)。

@@ -140,7 +140,8 @@ def routes(owner, desktop):
         expected[int(current["route_module"])] = owner + "_bus.monitor"
     else:
         assert current["route_module"] is None, current
-    if desktop:
+    native = current["desktop"].get("backend") == "native"
+    if desktop and not native:
         expected[int(current["desktop"]["route_module"])] = "desktop_bus.monitor"
     else:
         assert current["desktop"]["route_module"] is None, current
@@ -154,14 +155,45 @@ def routes(owner, desktop):
     assert output["state"] == ("RUNNING" if active else "SUSPENDED"), output["state"]
     assert output["mute"] == (not active), output["mute"]
     inputs = [s for s in pulse("sink-inputs") if int(s["sink"]) == int(output["index"])]
+    if native:
+        direct = [s for s in inputs if s["index"] == current["desktop"]["sink_input"]]
+        assert len(direct) == 1, inputs
+        assert direct[0]["corked"] == (not desktop), direct
+        assert direct[0].get("properties", {}).get("application.name") == "lan-audio-bridge-desktop-native"
+        assert direct[0].get("resample_method") == "speex-float-5", direct[0].get("resample_method")
+        inputs = [s for s in inputs if s["index"] != current["desktop"]["sink_input"]]
     assert {int(s["owner_module"]) for s in inputs} == set(expected), inputs
     assert len(inputs) == len(expected), inputs
     return True
 
 
+def clock_corrected_amplitude(samples, frequency):
+    """Measure test tones despite the receiver's bounded clock correction.
+
+    All generated test tones are below 1.5 kHz. Decimation is used only for
+    this synthetic fixture, and the narrow search also makes absent-tone
+    checks stricter than looking at a single, potentially nulled FFT bin.
+    """
+    values = samples[::8]
+    rate = RATE / 8
+    span = frequency * 0.0025 + 0.25
+    count = math.ceil(span / 0.25)
+    best = 0.0
+    for step in range(-count, count + 1):
+        coefficient = 2 * math.cos(2 * math.pi * (frequency + step * 0.25) / rate)
+        previous = previous2 = 0.0
+        for value in values:
+            current = value + coefficient * previous - previous2
+            previous2, previous = previous, current
+        power = previous * previous + previous2 * previous2 - coefficient * previous * previous2
+        best = max(best, 2 * math.sqrt(max(0, power)) / len(values))
+    return best
+
+
 def audio(expected, absent=()):
     samples = capture()
-    measured = {f: amplitude(samples, f) for f in set(expected) | set(absent)}
+    measure = clock_corrected_amplitude if status()["desktop"].get("backend") == "native" else amplitude
+    measured = {f: measure(samples, f) for f in set(expected) | set(absent)}
     for frequency, target in expected.items():
         assert target * 0.72 < measured[frequency] < target * 1.28, (expected, measured)
     for frequency in absent:
@@ -178,7 +210,16 @@ def phone_pids():
 
 def receiver_pid():
     import json
+    if status()["desktop"].get("backend") == "native":
+        return status()["children"]["desktop"]["pid"]
     return json.loads(Path("/run/lan-audio/desktop.json").read_text())["receiver_pid"]
+
+
+def desktop_identity():
+    current = status()
+    if current["desktop"].get("backend") == "native":
+        return current["children"]["desktop"]["pid"], current["desktop"]["sink_input"]
+    return current["desktop"]["route_module"], current["desktop"]["generation"]
 
 
 class FullScalePhone(Tone):
@@ -242,8 +283,7 @@ def test_all():
         eventually(lambda: routes(None, True), "desktop wake")
         audio({DESKTOP_HZ: 10000}, FREQUENCIES.values())
         assert phone_pids() == baseline_pids, "Desktop restarted phone receivers"
-        desktop_route = status()["desktop"]["route_module"]
-        generation = status()["desktop"]["generation"]
+        desktop_route = desktop_identity()
 
         print("All twelve directed phone takeovers with continuous desktop PCM", flush=True)
         monitor = Monitor()
@@ -257,8 +297,7 @@ def test_all():
                 time.sleep(0.4)
             phones[source] = Tone(source)
             eventually(lambda: routes(source, True), source + " mixed takeover")
-            assert status()["desktop"]["route_module"] == desktop_route
-            assert status()["desktop"]["generation"] == generation
+            assert desktop_identity() == desktop_route
             # Phone null buses retain their historical 2 s idle scheduling;
             # DLNA also retains its larger buffering policy. This is a steady
             # spectrum check, not a phone wake-latency assertion. Continuous
@@ -342,7 +381,8 @@ def test_all():
         time.sleep(2.2)  # Existing phone bus cold scheduling, as above.
         # Distinct frequencies repeatedly approach constructive peak alignment.
         values = capture()
-        levels = {f: amplitude(values, f) for f in (DESKTOP_HZ, 1370)}
+        measure = clock_corrected_amplitude if status()["desktop"].get("backend") == "native" else amplitude
+        levels = {f: measure(values, f) for f in (DESKTOP_HZ, 1370)}
         assert all(value > 13000 for value in levels.values()), levels
         peak = max(map(abs, values))
         assert 26000 < peak < 32767, ("full-scale headroom", peak)
@@ -369,7 +409,11 @@ def test_all():
             eventually(lambda: routes(None, False), "cycle idle")
             assert receiver_pid() == baseline_receiver, "Desktop receiver restarted"
             assert phone_pids() == idle_pids, "Desktop cycle restarted phone receiver"
-        assert not pulse("sink-inputs"), "Idle playback stream leak"
+        remaining = pulse("sink-inputs")
+        if status()["desktop"].get("backend") == "native":
+            assert len(remaining) == 1 and remaining[0]["corked"], "Native stream must remain corked"
+        else:
+            assert not remaining, "Idle playback stream leak"
         print("PASS: real VBAN PCM, mixing, 12 handoffs, gain isolation, idle/wake, recovery", flush=True)
     finally:
         if monitor:

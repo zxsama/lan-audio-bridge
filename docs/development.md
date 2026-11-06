@@ -6,6 +6,7 @@
 
 ```text
 app/                  运行时监督器、音源协调器与健康检查
+native/               可选的原生 VBAN / libpulse 接收器
 scripts/              主机检查、状态查询和 Windows/WSL 本机管理
 tests/                单元测试、音频集成、恢复、发现与 RAOP 发送测试
 docs/                 设计、运行约定、部署运维和历史验证记录
@@ -14,6 +15,7 @@ compose.yaml          NAS 实际声卡部署
 compose.host-avahi.yaml 生产配置专用的宿主 Avahi override
 compose.test.yaml     隔离的 null 输出测试实例
 compose.desktop-test.yaml  独立的 VBAN 与混音测试实例
+compose.native-test.yaml   独立的原生后端回归实例
 compose.local.yaml    Windows/WSL 常驻软件演示
 .env.example          生产配置模板，不含真实目录和设备标识
 ```
@@ -37,7 +39,7 @@ python3 -B -m unittest discover -s tests -p test_runtime.py -v
 测试配置使用 bridge 网络、独立 Docker volume 和 null 输出，不映射 `/dev/snd`，不发布端口，也不会播放到真实声卡。在 Linux/WSL 项目目录构建并运行独立测试实例：
 
 ```sh
-docker build -t lan-audio-bridge:0.3.1 .
+docker build -t lan-audio-bridge:0.4.0 .
 docker compose -f compose.test.yaml config --quiet
 docker compose -f compose.test.yaml up -d --wait --wait-timeout 120
 python3 -B tests/integration.py
@@ -66,7 +68,7 @@ docker compose -f compose.test.yaml down
 构建当前镜像后，可独立执行：
 
 ```sh
-python3 -B tests/host_avahi.py --image lan-audio-bridge:0.3.1
+python3 -B tests/host_avahi.py --image lan-audio-bridge:0.4.0
 ```
 
 该脚本在临时 Docker 网络命名空间中模拟独占 5353 的 Avahi、私有 D-Bus 和独立过滤代理，使用独立资源前缀并清理测试资源；不使用真实 host network、宿主 D-Bus、声卡、账号或发布端口。应检查代理访问限制、动态服务公告与失联恢复的实际输出。本节提供运行方法，各版本的执行结果见相应验证记录；新的执行结果应单独记录。
@@ -79,7 +81,7 @@ python3 -B tests/host_avahi.py --image lan-audio-bridge:0.3.1
 
 公开文档、配置示例和代码注释使用通用设备描述与明确标注的示例值，不包含私人采购链接、个人路径、实际网络地址、设备身份或对话记录。上游来源、许可证署名和协议常量应保持准确；验证记录应注明版本和证据范围。
 
-`.dockerignore` 使用白名单：构建只接收应用代码、两份容器内 shell 脚本、Dockerfile、项目许可证、第三方声明和上游来源文档。Windows/WSL 管理程序、测试、交付归档和本机状态不会复制到运行镜像中。
+`.dockerignore` 使用白名单：构建只接收应用代码、原生接收器 C 源码、两份容器内 shell 脚本、Dockerfile、项目许可证、第三方声明和上游来源文档。Windows/WSL 管理程序、测试、交付归档和本机状态不会复制到运行镜像中。
 
 ## 0.2.0 回归
 
@@ -93,7 +95,7 @@ python3 -B tests/host_avahi.py --image lan-audio-bridge:0.3.1
 
 ## VBAN 与双路混音
 
-`test_vban.py` 验证 PCM 包解析、源地址与流名匹配、序列及空闲生命周期。`test_runtime.py` 同时覆盖双路路由、握手状态与增益。以下测试使用已构建的 0.3.1 镜像：
+`test_vban.py` 验证 PCM 包解析、源地址与流名匹配、序列及空闲生命周期。`test_runtime.py` 同时覆盖双路路由、握手状态与增益。以下测试使用已构建的 0.4.0 镜像：
 
 ```sh
 docker compose -f compose.desktop-test.yaml up -d --wait --wait-timeout 120
@@ -108,6 +110,23 @@ docker compose -f compose.desktop-test.yaml down
 0.3.0 的本机验证结果及延迟测量范围见 [0.3.0 验证](verification-0.3.0.md)。
 
 Windows 音量、托盘、接收队列及单调时钟修复的结果见 [0.3.1 验证](verification-0.3.1.md)。
+
+原生接收器及完整应用回归结果见 [0.4.0 验证](verification-0.4.0.md)。
+
+### 原生接收后端
+
+原生程序在 Docker 构建阶段以 C11、`-Wall -Wextra -Werror` 编译，运行镜像仅包含动态链接的二进制。默认接收方式仍为 Python；下列独立环境显式启用 native，不合并生产 Compose。
+
+```sh
+docker build -t lan-audio-bridge:native-development .
+docker compose -f compose.native-test.yaml up -d --wait
+docker compose -f compose.native-test.yaml exec -T audio python3 /workspace/tests/desktop_audio.py --inside
+docker compose -f compose.native-test.yaml exec -T audio python3 /workspace/tests/desktop_recovery.py
+docker compose -f compose.native-test.yaml exec -T audio python3 -m unittest discover -s /workspace/tests -p 'test_*.py'
+docker compose -f compose.native-test.yaml down --volumes
+```
+
+`test_native_runtime.py` 覆盖控制身份、phone 路由建立顺序、HOLD 混音余量、故障退出竞态、旧流清理及 Unix socket 生命周期。`native_vban.py` 提供独立原生进程的 PCM、重排、欠载和延迟测量，详见[原生接收器说明](../native/README.md)。结果边界见[延迟验证](latency.md)。
 
 ## Windows 配置脚本
 
