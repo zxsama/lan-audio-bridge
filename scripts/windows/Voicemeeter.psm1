@@ -230,6 +230,10 @@ function Test-DesktopAudioPlan {
 
 function Get-DesktopAudioSnapshot {
     param($Remote, $Config, [int]$Slot)
+    # A failed first Setup can leave native backups without settings.json.
+    # This documentation address generates parameter keys only; no connection,
+    # stream or plan is applied. Every returned value is read from the mixer.
+    if ($null -eq $Config) { $Config = New-DesktopAudioConfig '192.0.2.1' }
     $keys = Get-DesktopAudioPlan $Config $Slot
     $keys['vban.Enable'] = 0
     $keys["vban.outstream[$Slot].on"] = 0
@@ -247,7 +251,25 @@ function Restore-VoicemeeterXml {
     $timer = [Diagnostics.Stopwatch]::StartNew()
     do {
         Start-Sleep -Milliseconds 100
-        try { if (Test-DesktopAudioPlan $Remote $Expected) { return } } catch { }
+        try {
+            if (Test-DesktopAudioPlan $Remote $Expected) { return }
+            # Standard can omit an inactive stream's route when loading XML.
+            # Once every other saved parameter matches, restore only those
+            # route values explicitly, then verify the complete snapshot again.
+            $mismatches = @()
+            foreach ($name in $Expected.Keys) {
+                $actual = if ($Expected[$name] -is [string]) { $Remote.GetString($name) } else { $Remote.GetFloat($name) }
+                if ($actual -cne $Expected[$name]) { $mismatches += $name }
+            }
+            if ($mismatches.Count -and -not @($mismatches | Where-Object { $_ -notmatch '^vban\.outstream\[[0-3]\]\.route$' }).Count) {
+                foreach ($name in $mismatches) {
+                    $enabledName = $name.Substring(0, $name.Length - 'route'.Length) + 'on'
+                    if ($Expected.Contains($enabledName) -and $Expected[$enabledName] -eq 0 -and $Remote.GetFloat($enabledName) -eq 0) {
+                        $Remote.SetFloat($name, [float]$Expected[$name])
+                    }
+                }
+            }
+        } catch { }
     } while ($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds)
     throw 'Voicemeeter XML restore did not match the saved parameters; backup has been retained.'
 }
@@ -313,6 +335,60 @@ function Set-EndpointVisibilityState {
         } catch { $failures += "$($endpoint.Id): $($_.Exception.Message)" }
     }
     if ($failures.Count) { throw ('Playback endpoint update failed: ' + ($failures -join '; ')) }
+}
+
+function ConvertTo-ProcessPowerSnapshot {
+    param($Snapshot)
+    if ($null -eq $Snapshot) { throw 'A process power snapshot is required.' }
+    $copy = New-Object LanAudioBridge.WindowsAudio.ProcessPowerSnapshot
+    $copy.ProcessId = [int]$Snapshot.ProcessId
+    $copy.ExecutablePath = [string]$Snapshot.ExecutablePath
+    $copy.CreationTime = [long]$Snapshot.CreationTime
+    $copy.ControlMask = [uint32]$Snapshot.ControlMask
+    $copy.StateMask = [uint32]$Snapshot.StateMask
+    return $copy
+}
+
+function Get-VoicemeeterRuntimePowerPolicy {
+    param([Parameter(Mandatory = $true)][int]$ProcessId, [string]$Directory = (Get-VoicemeeterDirectory))
+    if (-not $Directory) { throw 'Voicemeeter installation directory was not found.' }
+    return [LanAudioBridge.WindowsAudio.ProcessRuntime]::Get($ProcessId, (Join-Path $Directory 'voicemeeter.exe'))
+}
+
+function Set-VoicemeeterRuntimePowerPolicy {
+    param(
+        [Parameter(Mandatory = $true)]$Snapshot,
+        [Parameter(Mandatory = $true)][string]$BackupPath,
+        [switch]$DisableExecutionSpeed
+    )
+    if (Test-Path -LiteralPath $BackupPath) { throw 'Runtime power backup already exists; restore or retain it before applying another policy.' }
+    $before = ConvertTo-ProcessPowerSnapshot $Snapshot
+    $after = [LanAudioBridge.WindowsAudio.ProcessRuntime]::DesiredPolicy($before, [bool]$DisableExecutionSpeed)
+    # Prepared is sufficient for recovery even if the launcher stops immediately after the native write.
+    $record = [pscustomobject]@{ Schema = 1; Status = 'Prepared'; Before = $before; After = $after }
+    Write-AudioJson -Path $BackupPath -Value $record
+    $change = [LanAudioBridge.WindowsAudio.ProcessRuntime]::Apply($before, [bool]$DisableExecutionSpeed)
+    $record.After = $change.After
+    $record.Status = 'Applied'
+    Write-AudioJson -Path $BackupPath -Value $record
+    return $record
+}
+
+function Restore-VoicemeeterRuntimePowerPolicy {
+    param([Parameter(Mandatory = $true)][string]$BackupPath)
+    $record = Get-Content -LiteralPath $BackupPath -Raw | ConvertFrom-Json
+    if ($record.Schema -ne 1 -or $record.Status -notin @('Prepared', 'Applied', 'Restored')) { throw 'Unsupported runtime power backup.' }
+    $change = New-Object LanAudioBridge.WindowsAudio.ProcessPowerChange
+    $change.Before = ConvertTo-ProcessPowerSnapshot $record.Before
+    $change.After = ConvertTo-ProcessPowerSnapshot $record.After
+    $current = [LanAudioBridge.WindowsAudio.ProcessRuntime]::Get($change.Before.ProcessId, $change.Before.ExecutablePath)
+    if ($current.CreationTime -ne $change.Before.CreationTime) { throw 'Runtime power backup belongs to a previous process instance; the current process was left unchanged.' }
+    if ($current.ControlMask -ne $change.Before.ControlMask -or $current.StateMask -ne $change.Before.StateMask) {
+        $current = [LanAudioBridge.WindowsAudio.ProcessRuntime]::Restore($change)
+    }
+    $record.Status = 'Restored'
+    Write-AudioJson -Path $BackupPath -Value $record
+    return $current
 }
 
 Export-ModuleMember -Function *-*

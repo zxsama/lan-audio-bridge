@@ -304,6 +304,131 @@ class PlaybackTests(unittest.TestCase):
         self.assertEqual(self.factory.call_count, 1)
 
 
+class ClockedPlayer(FakePlayer):
+    """Finite downstream storage and a consumer clock, without wall-clock sleeps.
+
+    This models backpressure and sample conservation, not Pulse's exact buffer
+    implementation or its hardware latency.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.capacity = BYTE_RATE * 60 // 1000
+        self.prebuffer = BYTE_RATE * 40 // 1000
+        self.pending = 0
+        self.started = False
+        self.now = 0.0
+        self.fraction = 0.0
+        self.underrun_bytes = 0
+
+    def advance(self, now):
+        if self.started:
+            available = (now - self.now) * BYTE_RATE + self.fraction
+            consumed = int(available / 4) * 4
+            self.fraction = available - consumed
+            self.underrun_bytes += max(0, consumed - self.pending)
+            self.pending = max(0, self.pending - consumed)
+        self.now = now
+
+    def write(self, pcm):
+        if self.pending + len(pcm) > self.capacity:
+            return 0
+        self.pending += len(pcm)
+        self.started |= self.pending >= self.prebuffer
+        return super().write(pcm)
+
+
+class PlaybackClockTests(unittest.TestCase):
+    def simulate(self, stall_ms=0, sender_ppm=0, seconds=60):
+        stream = Stream(SOURCE, "Windows")
+        player = ClockedPlayer()
+        playback = Playback(stream, "desktop_bus", 30, Path("unused"),
+                            lambda *args: player, lambda *args: True)
+        interval = .005 / (1 + sender_ppm / 1_000_000)
+        sequence = 0
+        expected = bytearray()
+        high_water = 0
+        settled = []
+        for milliseconds in range(seconds * 1000):
+            now = milliseconds / 1000
+            player.advance(now)
+            if stall_ms and milliseconds >= 1000 and 0 < milliseconds % 1000 <= stall_ms:
+                continue
+            while sequence * interval <= now:
+                data = packet(sequence, value=sequence % 32766 + 1)
+                expected.extend(data[HEADER.size:])
+                stream.receive(data, SOURCE, now)
+                sequence += 1
+            playback.tick(now)
+            high_water = max(high_water, stream.queued_bytes)
+            if milliseconds >= 1000 and milliseconds % 1000 == 100:
+                settled.append(stream.queued_bytes)
+        return stream, player, expected, high_water, settled
+
+    def test_repeated_scheduler_stalls_recover_without_dropping_or_zero_fill(self):
+        stream, player, expected, high_water, settled = self.simulate(stall_ms=30)
+        # The old now-10ms deadline ratcheted to ~490ms within 30 seconds.
+        self.assertLessEqual(high_water, BYTE_RATE * .060)
+        self.assertTrue(settled)
+        self.assertLessEqual(max(settled), BYTE_RATE * .025)
+        self.assertEqual(stream.statistics["queue_dropped_bytes"], 0)
+        self.assertEqual(stream.statistics["underrun_fill_bytes"], 0)
+        self.assertEqual(player.underrun_bytes, 0)
+        played = b"".join(player.writes)
+        remaining = b"".join(pcm for _, pcm in stream.queue)
+        self.assertEqual(played + remaining, expected)
+
+    def test_clock_offsets_remain_observable_instead_of_hidden_by_silence(self):
+        # This is deliberately a finite 20-second skew check. Keeping the PCM
+        # unchanged cannot solve arbitrary long-term independent clock drift;
+        # +/-500ppm must appear as +/-10ms of queue change, not silent padding.
+        queues = {}
+        for ppm in (-500, 0, 500):
+            with self.subTest(sender_ppm=ppm):
+                stream, player, expected, _, _ = self.simulate(sender_ppm=ppm, seconds=20)
+                queues[ppm] = stream.queued_bytes
+                self.assertEqual(stream.statistics["queue_dropped_bytes"], 0)
+                self.assertEqual(stream.statistics["underrun_fill_bytes"], 0)
+                self.assertEqual(player.underrun_bytes, 0)
+                played = b"".join(player.writes)
+                remaining = b"".join(pcm for _, pcm in stream.queue)
+                self.assertEqual(played + remaining, expected)
+        for ppm in (-500, 500):
+            self.assertAlmostEqual((queues[ppm] - queues[0]) / BYTE_RATE,
+                                   ppm / 1_000_000 * 20, delta=.0051)
+
+    def test_catchup_budget_limits_work_without_discarding_sample_deadline(self):
+        stream = Stream(SOURCE, "Windows")
+        player = FakePlayer()
+        playback = Playback(stream, "desktop_bus", 30, Path("unused"),
+                            lambda *args: player, lambda *args: True)
+        for sequence in range(20):
+            stream.receive(packet(sequence), SOURCE, sequence * .005)
+        playback.tick(.1)
+        first = stream.statistics["played_bytes"]
+        playback.tick(.15)
+        self.assertLessEqual(stream.statistics["played_bytes"] - first, BYTE_RATE // 100)
+        self.assertLess(playback.next_write, .15)
+        # There is real PCM debt; successive ticks may catch it up, preserving
+        # the byte order rather than silently rebasing the sample clock.
+        for index in range(1, 51):
+            playback.tick(.15 + index * .001)
+        self.assertEqual(stream.queued_bytes, 0)
+        self.assertEqual(stream.statistics["queue_dropped_bytes"], 0)
+
+    def test_empty_queue_does_not_turn_stale_deadline_into_silence_burst(self):
+        stream = Stream(SOURCE, "Windows")
+        player = FakePlayer()
+        playback = Playback(stream, "desktop_bus", 30, Path("unused"),
+                            lambda *args: player, lambda *args: True)
+        stream.receive(packet(), SOURCE, 0)
+        playback.tick(.02)
+        before = stream.statistics["underrun_fill_bytes"]
+        playback.tick(.2)
+        self.assertEqual(stream.statistics["underrun_fill_bytes"] - before, BYTE_RATE // 200)
+        self.assertAlmostEqual(playback.next_write, .205)
+
+
 class StateTests(unittest.TestCase):
     def test_atomic_state_and_exact_generation_ack(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -344,6 +469,20 @@ class StateTests(unittest.TestCase):
             for state in ("idle", "starting", "stopping", "stopped", "failed"):
                 path.write_text(json.dumps(dict(base, state=state)))
                 self.assertFalse(route_ready(path, "test", now=101))
+
+    def test_route_ack_uses_monotonic_time_across_clock_corrections(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "status.json"
+            state = {"desktop": {"enabled": True, "active": True, "generation": "test",
+                                  "route_module": 1}, "state": "playing",
+                     "heartbeat_unix": 1000, "heartbeat_monotonic": 50}
+            path.write_text(json.dumps(state))
+            with patch("vban_receiver.time.monotonic", return_value=50.1):
+                self.assertTrue(route_ready(path, "test", now=0))
+                self.assertTrue(route_ready(path, "test", now=10000))
+            for monotonic in (49.9, 52.01):
+                with patch("vban_receiver.time.monotonic", return_value=monotonic):
+                    self.assertFalse(route_ready(path, "test", now=1000))
 
     def test_pipe_backpressure_and_signal_child_cleanup(self):
         player = PulsePlayer.__new__(PulsePlayer)

@@ -1,7 +1,7 @@
 name: lan-audio-bridge
 services:
   audio:
-    image: lan-audio-bridge:0.3.0
+    image: lan-audio-bridge:0.3.1
     pull_policy: never
     network_mode: host
     init: true
@@ -28,6 +28,8 @@ services:
       VBAN_PORT: ${VBAN_PORT:-6980}
       VBAN_STREAM_NAME: ${VBAN_STREAM_NAME:-Windows}
       DESKTOP_BUFFER_MS: ${DESKTOP_BUFFER_MS:-50}
+      DESKTOP_PLAYER_MS: ${DESKTOP_PLAYER_MS:-30}
+      DESKTOP_JITTER_MS: ${DESKTOP_JITTER_MS:-20}
       DESKTOP_VOLUME: ${DESKTOP_VOLUME:-100}
       DESKTOP_IDLE_MS: ${DESKTOP_IDLE_MS:-500}
       DLNA_BUFFER_MS: ${DLNA_BUFFER_MS:-1000}

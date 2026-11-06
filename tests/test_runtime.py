@@ -544,16 +544,33 @@ class DualLaneTests(unittest.TestCase):
         command = receiver_commands(config, "identity")["desktop"]
         self.assertIn("desktop_bus", command)
         self.assertIn("--runtime-status", command)
-        self.assertNotIn("--buffer-ms", command)
+        self.assertEqual(command[command.index("--buffer-ms") + 1], "20")
         self.assertEqual(command[command.index("--latency-ms") + 1], "30")
         self.assertEqual(command[command.index("--route-latency-ms") + 1], "50")
         self.assertIn("sink_name=desktop_bus rate=48000 channels=2 norewinds=true", pulse_config(config))
         for key, value in (("VBAN_SOURCE_IP", ""), ("VBAN_SOURCE_IP", "::1"),
                            ("VBAN_STREAM_NAME", "名" * 6), ("ENABLE_DESKTOP", "1"),
                            ("DESKTOP_BUFFER_MS", "19"), ("DESKTOP_BUFFER_MS", "501"),
-                           ("DESKTOP_IDLE_MS", "199"), ("DESKTOP_VOLUME", "101")):
+                           ("DESKTOP_IDLE_MS", "199"), ("DESKTOP_VOLUME", "101"),
+                           ("DESKTOP_PLAYER_MS", "4"), ("DESKTOP_PLAYER_MS", "201"),
+                           ("DESKTOP_JITTER_MS", "4"), ("DESKTOP_JITTER_MS", "201")):
             with self.subTest(key=key), self.assertRaises(BridgeError):
                 Config.from_env({"AUDIO_MODE": "null", "ENABLE_DESKTOP": "true", "VBAN_SOURCE_IP": "192.0.2.4", key: value})
+
+    def test_desktop_buffers_are_independent_and_reported(self):
+        config = Config.from_env({"AUDIO_MODE": "null", "ENABLE_DESKTOP": "true",
+                                  "VBAN_SOURCE_IP": "192.0.2.4", "DESKTOP_PLAYER_MS": "10",
+                                  "DESKTOP_JITTER_MS": "15", "DESKTOP_BUFFER_MS": "25"})
+        command = receiver_commands(config, "identity")["desktop"]
+        self.assertEqual(command[command.index("--latency-ms") + 1], "10")
+        self.assertEqual(command[command.index("--buffer-ms") + 1], "15")
+        self.assertEqual(command[command.index("--route-latency-ms") + 1], "25")
+        self.assertEqual(config.dlna_buffer_ms, 1000)
+        with patch("runtime.atomic_write") as write:
+            Runtime(config).write_status()
+        buffers = json.loads(write.call_args.args[1])["buffers"]
+        self.assertEqual(buffers["desktop_player_ms"], 10)
+        self.assertEqual(buffers["desktop_jitter_ms"], 15)
 
     def test_configured_desktop_buffer_controls_loopback_and_status(self):
         runtime = Runtime(Config(audio_mode="null", desktop_enabled=True, desktop_buffer_ms=123))
@@ -565,6 +582,22 @@ class DualLaneTests(unittest.TestCase):
         with patch("runtime.atomic_write") as write:
             runtime.write_status()
         self.assertEqual(json.loads(write.call_args.args[1])["buffers"]["desktop_ms"], 123)
+
+    def test_desktop_heartbeat_ignores_wall_clock_steps_but_expires(self):
+        runtime = Runtime(Config(audio_mode="null", desktop_enabled=True))
+        runtime.pulse = self.pulse
+        process = Process()
+        runtime.supervisor.children["desktop"] = Child("desktop", [], process=process, state="running")
+        value = {"active": True, "enabled": True, "generation": str(uuid.uuid4()),
+                 "receiver_pid": process.pid, "updated_at": 1000, "updated_monotonic": 50}
+        with patch.object(Path, "read_text", return_value=json.dumps(value)):
+            with patch("runtime.time.monotonic", return_value=50.1):
+                for wall in (0, 10000):
+                    runtime.update_desktop(wall)
+                    self.assertEqual(runtime.desktop_generation, value["generation"])
+            with patch("runtime.time.monotonic", return_value=52.01):
+                runtime.update_desktop(1000)
+                self.assertIsNone(runtime.desktop_generation)
 
     def test_handshake_requires_fresh_live_matching_process_and_clears_only_desktop(self):
         runtime = Runtime(Config(audio_mode="null", desktop_enabled=True))
@@ -705,6 +738,15 @@ class SupervisorTests(unittest.TestCase):
 
 
 class HealthTests(unittest.TestCase):
+    def test_health_ignores_wall_clock_steps_but_expires(self):
+        status = self.status()
+        status["heartbeat_monotonic"] = 50
+        with patch("healthcheck.time.monotonic", return_value=50.1):
+            for wall in (0, 10000):
+                self.assertTrue(healthy(status, wall, lambda pid: None))
+        with patch("healthcheck.time.monotonic", return_value=60.01):
+            self.assertFalse(healthy(status, 100, lambda pid: None))
+
     def test_desktop_only_playing_and_receiver_failure(self):
         status = self.status()
         status.update(state="playing", desktop={"enabled": True, "active": True, "route_module": 8})

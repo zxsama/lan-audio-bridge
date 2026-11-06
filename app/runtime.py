@@ -60,6 +60,8 @@ class Config:
     desktop_buffer_ms: int = 50
     desktop_volume: int = 100
     desktop_idle_ms: int = 500
+    desktop_player_ms: int = 30
+    desktop_jitter_ms: int = 20
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Config:
@@ -124,7 +126,8 @@ class Config:
                    number("OUTPUT_BUFFER_MS", 200, 50, 1000), desktop == "true",
                    number("VBAN_PORT", 6980, 1024, 65535), source_ip, stream,
                    number("DESKTOP_BUFFER_MS", 50, 20, 500),
-                   number("DESKTOP_VOLUME", 100, 0, 100), number("DESKTOP_IDLE_MS", 500, 200, 5000))
+                   number("DESKTOP_VOLUME", 100, 0, 100), number("DESKTOP_IDLE_MS", 500, 200, 5000),
+                   number("DESKTOP_PLAYER_MS", 30, 5, 200), number("DESKTOP_JITTER_MS", 20, 5, 200))
 
 
 def atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
@@ -296,7 +299,8 @@ def receiver_commands(config: Config, identity: str, address: str = "") -> dict[
     if config.desktop_enabled:
         selected["desktop"] = ["python3", "/app/vban_receiver.py", "--port", str(config.vban_port),
                                "--source-ip", config.vban_source_ip, "--stream-name", config.vban_stream_name,
-                               "--sink", "desktop_bus", "--latency-ms", "30",
+                               "--sink", "desktop_bus", "--latency-ms", str(config.desktop_player_ms),
+                               "--buffer-ms", str(config.desktop_jitter_ms),
                                "--route-latency-ms", str(config.desktop_buffer_ms),
                                "--idle-ms", str(config.desktop_idle_ms),
                                "--state-path", "/run/lan-audio/desktop.json",
@@ -734,10 +738,14 @@ class Runtime:
         generation = None
         try:
             value = json.loads((RUN_DIR / "desktop.json").read_text(encoding="utf-8"))
+            # Both processes share the host monotonic clock. Wall-clock steps
+            # (for example NTP correction) must not tear down an active route.
+            age = (time.monotonic() - value["updated_monotonic"]
+                   if "updated_monotonic" in value else now - value["updated_at"])
             if (child is not None and child.state == "running" and child.process is not None
                     and child.process.poll() is None
                     and type(value["receiver_pid"]) is int and value["receiver_pid"] == child.process.pid
-                    and 0 <= now - value["updated_at"] <= 2
+                    and 0 <= age <= 2
                     and value["active"] is True and value["enabled"] is True):
                 generation = str(uuid.UUID(value["generation"]))
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -748,11 +756,14 @@ class Runtime:
         self.desktop_generation = generation
 
     def write_status(self) -> None:
-        status = {"schema": 1, "pid": os.getpid(), "heartbeat_unix": time.time(), "state": self.state,
+        status = {"schema": 1, "pid": os.getpid(), "heartbeat_unix": time.time(),
+                  "heartbeat_monotonic": time.monotonic(), "state": self.state,
                   "owner": self.coordinator.owner, "enabled": list(self.config.enabled),
                   "avahi_mode": self.config.avahi_mode,
                   "buffers": {"dlna_ms": self.config.dlna_buffer_ms, "output_ms": self.config.output_buffer_ms,
-                              "desktop_ms": self.config.desktop_buffer_ms},
+                              "desktop_ms": self.config.desktop_buffer_ms,
+                              "desktop_player_ms": self.config.desktop_player_ms,
+                              "desktop_jitter_ms": self.config.desktop_jitter_ms},
                   "route_module": self.pulse.route_module, "children": self.supervisor.statuses()}
         status["desktop"] = {"enabled": self.config.desktop_enabled,
                              "active": self.pulse.desktop_route_module is not None,

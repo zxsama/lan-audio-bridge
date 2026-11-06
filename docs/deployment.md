@@ -17,12 +17,12 @@
 
 ## 构建与 CLI 部署
 
-以下命令在 Linux 项目目录执行。构建镜像需要下载上游依赖，生成本地镜像 `lan-audio-bridge:0.3.0`。项目未发布公共容器镜像。
+以下命令在 Linux 项目目录执行。构建镜像需要下载上游依赖，生成本地镜像 `lan-audio-bridge:0.3.1`。项目未发布公共容器镜像。
 
 ```sh
 git clone https://github.com/zxsama/lan-audio-bridge.git
 cd lan-audio-bridge
-docker build --tag lan-audio-bridge:0.3.0 .
+docker build --tag lan-audio-bridge:0.3.1 .
 cp .env.example .env
 ```
 
@@ -54,7 +54,7 @@ docker compose logs --tail=100 audio
 
 仓库发布源码与部署文件，不包含预构建镜像或本地 `dist/` 归档。请先按上节构建镜像，再部署或导出。
 
-先确保 NAS 本地 Docker 中已有镜像。如果在另一台 Linux amd64 机器构建，可执行 `docker save -o lan-audio-bridge-0.3.0.tar lan-audio-bridge:0.3.0`，自行传输到 NAS，再执行 `docker load -i lan-audio-bridge-0.3.0.tar`。项目脚本不会自动远程操作 NAS。
+先确保 NAS 本地 Docker 中已有镜像。如果在另一台 Linux amd64 机器构建，可执行 `docker save -o lan-audio-bridge-0.3.1.tar lan-audio-bridge:0.3.1`，自行传输到 NAS，再执行 `docker load -i lan-audio-bridge-0.3.1.tar`。项目脚本不会自动远程操作 NAS。
 
 填写 `.env` 后在 NAS 项目目录运行：
 

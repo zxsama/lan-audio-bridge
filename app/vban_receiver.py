@@ -213,7 +213,9 @@ def route_ready(path: Path, generation: str, now=None) -> bool:
         status = json.loads(path.read_text(encoding="utf-8"))
         desktop = status["desktop"]
         module = desktop.get("route_module")
-        age = (time.time() if now is None else now) - status["heartbeat_unix"]
+        age = (time.monotonic() - status["heartbeat_monotonic"]
+               if "heartbeat_monotonic" in status
+               else (time.time() if now is None else now) - status["heartbeat_unix"])
         return (0 <= age <= 2 and status.get("state") == "playing"
                 and desktop.get("enabled") is True and desktop.get("active") is True
                 and desktop.get("generation") == generation
@@ -225,6 +227,7 @@ def route_ready(path: Path, generation: str, now=None) -> bool:
 def publish(path: Path, stream: Stream):
     state = {"schema": 1, "enabled": True, "active": stream.active,
              "generation": stream.generation, "updated_at": time.time(),
+             "updated_monotonic": time.monotonic(),
              "receiver_pid": os.getpid(), "statistics": dict(stream.statistics),
              "error_code": stream.error_code,
              "queued_ms": round(stream.queued_bytes / BYTE_RATE * 1000, 2)}
@@ -291,10 +294,14 @@ class Playback:
             self.blocked_since = None
             self.last_nonzero_write = None
         self.player.check()
-        # A bounded batch also handles legal packets carrying only one sample.
-        # Each <=1024-byte write is atomic on Linux; catch-up is capped at 10 ms.
+        # Keep the original sample deadline through scheduling stalls. Moving
+        # it to now - 10 ms permanently converted each longer stall into queued
+        # latency. Bound work per tick instead of discarding that clock debt;
+        # the nonblocking pipe remains the final consumer backpressure limit.
+        # The count bound also handles legal one-sample packets.
+        budget = BYTE_RATE // 100  # At most 10 ms of PCM per tick.
         for _ in range(64):
-            if now < self.next_write:
+            if now < self.next_write or not budget:
                 return
             filling = not stream.queue
             if filling and stream.ending(now):
@@ -302,7 +309,11 @@ class Playback:
             # Keep a short notification flowing through Pulse's prebuffer even
             # when its sender sends no more packets. This does not refresh the
             # packet/nonzero timers and cannot wake an idle route.
-            pcm = bytes(960) if filling else stream.queue[0][1][:1024]
+            # A missing input has no real samples to catch up. Never turn old
+            # clock debt into a burst of silence ahead of the next real packet.
+            if filling:
+                self.next_write = now
+            pcm = bytes(min(960, budget)) if filling else stream.queue[0][1][:min(1024, budget)]
             written = self.player.write(pcm)
             if not written:
                 stream.statistics["backpressure"] += 1
@@ -319,7 +330,8 @@ class Playback:
                     self.last_nonzero_write = now
                 stream.consume(written)
             stream.statistics["played_bytes"] += written
-            self.next_write = max(self.next_write, now - 0.01) + written / BYTE_RATE
+            budget -= written
+            self.next_write += written / BYTE_RATE
 
 
 def arguments(argv=None):

@@ -13,7 +13,8 @@ from runtime import avahi_available
 def healthy(status: dict, now: float, alive=None) -> bool:
     alive = alive or (lambda pid: os.kill(pid, 0))
     try:
-        age = now - status["heartbeat_unix"]
+        age = (time.monotonic() - status["heartbeat_monotonic"]
+               if "heartbeat_monotonic" in status else now - status["heartbeat_unix"])
         if not 0 <= age <= 10 or status["state"] not in ("idle", "playing"):
             return False
         if type(status["pid"]) is not int or status["pid"] <= 0:

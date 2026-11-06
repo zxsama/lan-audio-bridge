@@ -12,6 +12,8 @@ VBAN_SOURCE_IP=192.0.2.10
 VBAN_PORT=6980
 VBAN_STREAM_NAME=Windows
 DESKTOP_BUFFER_MS=50
+DESKTOP_PLAYER_MS=30
+DESKTOP_JITTER_MS=20
 DESKTOP_VOLUME=100
 DESKTOP_IDLE_MS=500
 ```
@@ -25,6 +27,8 @@ DESKTOP_IDLE_MS=500
 | `VBAN_PORT` | `6980` | UDP 接收端口 |
 | `VBAN_STREAM_NAME` | `Windows` | 精确匹配的流名，最多 16 UTF-8 字节 |
 | `DESKTOP_BUFFER_MS` | `50` | 电脑输出路由的目标缓冲，20–500 ms |
+| `DESKTOP_PLAYER_MS` | `30` | 电脑 PCM 播放客户端的目标缓冲，5–200 ms |
+| `DESKTOP_JITTER_MS` | `20` | 首次播放前的接收缓冲，5–200 ms |
 | `DESKTOP_VOLUME` | `100` | 电脑输入音量，0–100 |
 | `DESKTOP_IDLE_MS` | `500` | 连续数字静音或断流后的空闲等待，200–5000 ms |
 
@@ -58,6 +62,8 @@ Standard 的总线名称是 BUS B；Windows 的 `Voicemeeter Out B1` 是录音�
 
 电脑路由使用独立缓冲，不改变 `DLNA_BUFFER_MS` 和手机 `OUTPUT_BUFFER_MS`。配置值仅是软件缓冲目标，不等于 Windows 到音响的端到端延迟。真实延迟还包括 Windows 音频引擎、发送/接收队列、局域网及音频设备。
 
-先使用 50 ms 桌面路由缓冲，再结合实际网络和输出设备降低；出现欠载时应增大缓冲。空闲恢复还包括路由建立时间，不能用稳态延迟代表首次出声。
+保守配置为路由 50 ms、播放器 30 ms、首播接收缓冲 20 ms。有线局域网可从 `30 / 15 / 15` 组合开始测量；出现欠载时应增大对应缓冲。数值更小不保证实际延迟更低。空闲恢复还包括路由建立时间，不能用稳态延迟代表首次出声。
+
+接收端保留采样期限并限制每次追赶的工作量，防止短调度停顿持续累积为播放延迟。内部心跳使用同一主机的单调时钟，系统校时不会被误判为接收器失联。音频仍为 48 kHz / PCM16，不通过升采样率或标称位深声称提高源音质。
 
 软件验证在独立容器中发送 VBAN PCM，并从 PulseAudio 输出监视器录制，检查混音、切换、独立音量、静音释放和恢复。Windows 驱动与实际设备仍需按上述配置完成现场验收。复现命令见[开发文档](development.md)。

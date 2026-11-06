@@ -243,6 +243,18 @@ Test-Case 'Mixer snapshot preserves all 18 current values including stream and g
     Assert-Equal $snapshot['vban.outstream[2].on'] 1
     Assert-Equal $remote.Writes.Count 0
 }
+Test-Case 'Snapshot without Ready settings reads the real mixer and never applies template values' {
+    $remote = New-Object DesktopAudioTestRemote
+    $remote.Strings['vban.outstream[1].ip'] = '192.0.2.77'
+    $remote.Strings['vban.outstream[1].name'] = 'Existing'
+    $remote.Floats['vban.outstream[1].route'] = 3
+    $snapshot = Get-DesktopAudioSnapshot $remote $null 1
+    Assert-Equal $snapshot.Count 18
+    Assert-Equal $snapshot['vban.outstream[1].ip'] '192.0.2.77'
+    Assert-Equal $snapshot['vban.outstream[1].name'] 'Existing'
+    Assert-Equal $snapshot['vban.outstream[1].route'] 3
+    Assert-Equal $remote.Writes.Count 0
+}
 Test-Case 'XML restore tolerates stale successful Dirty reads and verifies every saved field before returning' {
     $remote = New-Object DesktopAudioTestRemote
     $remote.LoadDelayDirtyReads = 3
@@ -264,6 +276,42 @@ Test-Case 'XML restore reports failure when saved parameters never become observ
     $remote.NeverCompleteLoad = $true
     Assert-Throws { Restore-VoicemeeterXml $remote 'X:\Fake\original.xml' ([ordered]@{ 'vban.Enable' = 1 }) -TimeoutSeconds 0 } 'did not match.*backup'
     Assert-Equal $remote.DirtyReadsAfterLoad 1
+    Assert-Equal $remote.Writes.Count 1
+}
+Test-Case 'XML restore supplements only omitted inactive stream routes and verifies their readback' {
+    $remote = New-Object DesktopAudioTestRemote
+    $expected = [ordered]@{ 'vban.outstream[2].on' = 0; 'vban.outstream[2].route' = 3; 'Bus[1].Gain' = -3 }
+    $remote.LoadFloats['Bus[1].Gain'] = -3
+    Restore-VoicemeeterXml $remote 'X:\Fake\original.xml' $expected -TimeoutSeconds 1
+    Assert-Equal $remote.Writes.Count 2
+    Assert-Equal $remote.Writes[1] 'vban.outstream[2].route=3'
+    Assert-True (Test-DesktopAudioPlan $remote $expected)
+}
+Test-Case 'XML restore does not supplement routes while other saved parameters are unsettled' {
+    $remote = New-Object DesktopAudioTestRemote
+    $expected = [ordered]@{ 'vban.outstream[2].on' = 0; 'vban.outstream[2].route' = 3; 'Bus[1].Gain' = -3 }
+    Assert-Throws { Restore-VoicemeeterXml $remote 'X:\Fake\original.xml' $expected -TimeoutSeconds 0 } 'did not match'
+    Assert-Equal $remote.Writes.Count 1
+}
+Test-Case 'XML restore route supplement must pass actual readback' {
+    $remote = New-Object DesktopAudioTestRemote
+    $remote.IgnoreWrite = 'vban.outstream[2].route'
+    $expected = [ordered]@{ 'vban.outstream[2].on' = 0; 'vban.outstream[2].route' = 3 }
+    Assert-Throws { Restore-VoicemeeterXml $remote 'X:\Fake\original.xml' $expected -TimeoutSeconds 0 } 'did not match'
+    Assert-Equal $remote.Writes.Count 2
+    Assert-Equal $remote.GetFloat('vban.outstream[2].route') 0
+}
+Test-Case 'XML restore never patches an active stream route' {
+    $remote = New-Object DesktopAudioTestRemote
+    $remote.LoadFloats['vban.outstream[2].on'] = 1
+    $expected = [ordered]@{ 'vban.outstream[2].on' = 1; 'vban.outstream[2].route' = 3 }
+    Assert-Throws { Restore-VoicemeeterXml $remote 'X:\Fake\original.xml' $expected -TimeoutSeconds 0 } 'did not match'
+    Assert-Equal $remote.Writes.Count 1
+}
+Test-Case 'XML restore never patches a route without a saved inactive flag' {
+    $remote = New-Object DesktopAudioTestRemote
+    $expected = [ordered]@{ 'vban.outstream[2].route' = 3 }
+    Assert-Throws { Restore-VoicemeeterXml $remote 'X:\Fake\original.xml' $expected -TimeoutSeconds 0 } 'did not match'
     Assert-Equal $remote.Writes.Count 1
 }
 Test-Case 'Slot selection preserves enabled streams and fails safely when full' {
@@ -467,7 +515,7 @@ Test-Case 'Pending-reboot cleanup defers without touching devices when the prima
         Assert-Equal ([DesktopAudioTestEndpoints]::VisibilityWrites.Count) 0
     } finally { [DesktopAudioTestEndpoints]::Render = $before }
 }
-foreach ($restoreScenario in @('MissingAuxiliary', 'AuxiliaryFailure')) {
+foreach ($restoreScenario in @('MissingAuxiliary', 'AuxiliaryFailure', 'NativeVolumeFailure', 'NoReadySettings')) {
     Test-Case "Restore $restoreScenario continues physical defaults and startup recovery" {
         . (Get-IsolatedFunction 'Restore-DefaultEndpoints')
         . (Get-IsolatedFunction 'Set-EndpointVisibilityState')
@@ -489,12 +537,34 @@ foreach ($restoreScenario in @('MissingAuxiliary', 'AuxiliaryFailure')) {
         [IO.File]::WriteAllText($backupPath, ($original | ConvertTo-Json -Depth 6))
         [IO.File]::WriteAllText($endpointBackupPath, (@{ Endpoints = @(@{ Id = 'extra' }, @{ Id = 'removed' }, @{ Id = 'disconnected' }) } | ConvertTo-Json -Depth 6))
         $before = [DesktopAudioTestEndpoints]::Render
-        $fakeRestore = @{ Startup = $null; Status = $null }
+        $fakeRestore = @{ Startup = $null; Status = $null; NativeAttempted = $false; PreferencesRestored = $false; BackgroundRestored = $false }
         function Set-StartupValue { param($Value) $fakeRestore.Startup = $Value.Value }
         function Write-AudioJson { param([string]$Path, $Value) $fakeRestore.Status = $Value.Status }
         function Connect-Remote { throw 'Unexpected mixer connection in isolated restore' }
+        function Restore-DriverVolumeControl {
+            param([string]$Directory)
+            $fakeRestore.NativeAttempted = $true
+            throw 'Injected native volume restore failure'
+        }
         $settings = [pscustomobject]@{ Status = 'Ready' }
         $directory = $null
+        if ($restoreScenario -eq 'NativeVolumeFailure') { $directory = 'X:\FakeInstalled' }
+        if ($restoreScenario -eq 'NoReadySettings') {
+            $settings = $null
+            $directory = 'X:\FakeInstalled'
+            [IO.File]::WriteAllText((Join-Path $stateRoot 'original.xml'), '<Voicemeeter />')
+            [IO.File]::WriteAllText((Join-Path $stateRoot 'original-parameters.json'), '{"vban.Enable":0}')
+            function Connect-Remote { return (New-Object DesktopAudioTestRemote) }
+            function Restore-VoicemeeterXml { param($Remote,$Path,$Expected) Assert-Equal $Expected['vban.Enable'] 0 }
+            function Restore-BackgroundPlayback { param($Directory) $fakeRestore.BackgroundRestored = $true }
+            function Update-NativePlaybackOptions {
+                param($Connection,$Directory,$Config,[switch]$Restore)
+                Assert-True $Restore; Assert-True ($null -eq $Config)
+                $fakeRestore.PreferencesRestored = $true
+                return $Connection
+            }
+            function Restore-DriverVolumeControl { param($Directory) $fakeRestore.NativeAttempted = $true }
+        }
         $Action = 'Restore'
         try {
             [DesktopAudioTestEndpoints]::Render = @(
@@ -507,7 +577,13 @@ foreach ($restoreScenario in @('MissingAuxiliary', 'AuxiliaryFailure')) {
             & $isolatedRestore
             foreach ($role in 0..2) { Assert-Equal ([DesktopAudioTestEndpoints]::GetDefault($role)) "speaker$role" }
             Assert-Equal $fakeRestore.Startup 'original startup'
-            Assert-Equal $fakeRestore.Status 'Restored'
+            if ($restoreScenario -eq 'NoReadySettings') {
+                Assert-Equal $fakeRestore.Status $null
+                Assert-True $fakeRestore.PreferencesRestored
+                Assert-True $fakeRestore.BackgroundRestored
+                Assert-True (-not (Test-Path -LiteralPath $settingsPath))
+            } else { Assert-Equal $fakeRestore.Status 'Restored' }
+            Assert-Equal $fakeRestore.NativeAttempted ($restoreScenario -in @('NativeVolumeFailure', 'NoReadySettings'))
             Assert-Equal ([DesktopAudioTestEndpoints]::VisibilityWrites -join ',') 'extra=True'
         } finally {
             [DesktopAudioTestEndpoints]::Render = $before
@@ -579,7 +655,17 @@ foreach ($failureMode in @('Startup', 'Settings', 'MixerRollback', 'EndpointRoll
         foreach ($role in 0..2) { [DesktopAudioTestEndpoints]::SetDefault("speaker$role", $role) }
         $beforeDefaults = @(Get-DefaultEndpoints)
         $beforeStartup = [pscustomobject]@{ Exists = $true; Value = 'prior command' }
-        $fakeState = @{ Startup = $beforeStartup; Mode = $failureMode; ProfileLock = $null }
+        $directory = 'X:\FakeInstalled'
+        $runtimePolicyBackup = $null
+        $fakeState = @{ Startup = $beforeStartup; Mode = $failureMode; ProfileLock = $null; RuntimeRestored = $false }
+        function Enable-BackgroundPlayback {
+            param([string]$Directory)
+            [pscustomobject]@{ Path = (Join-Path $stateRoot 'fake-runtime.json'); Changed = $true }
+        }
+        function Restore-VoicemeeterRuntimePowerPolicy {
+            param([string]$BackupPath)
+            $fakeState.RuntimeRestored = $true
+        }
         function Set-StartupAction {
             param([string]$StartupAction)
             $fakeState.Startup = [pscustomobject]@{ Exists = $true; Value = $StartupAction }
@@ -617,6 +703,7 @@ foreach ($failureMode in @('Startup', 'Settings', 'MixerRollback', 'EndpointRoll
         Assert-True ([DesktopAudioTestEndpoints]::VisibilityWrites.Contains('extra=True')) 'Endpoint visibility rollback was not attempted.'
         if ($failureMode -ne 'CompoundRollback') { Assert-Equal ([DesktopAudioTestEndpoints]::GetState('extra')) 1 }
         Assert-True (-not (Test-Path -LiteralPath $settingsPath)) 'Failed settings must not be committed.'
+        Assert-True $fakeState.RuntimeRestored 'Background process policy rollback was not attempted.'
     }
 }
 
