@@ -28,6 +28,7 @@ PowerShell 中可传参数，例如 `./scripts/windows-audio.ps1 -Address 192.16
 - **引擎周期**：Windows 共享模式引擎按所有客户端请求的最小周期运行。发送端在被采集的端点上保持一个静音 IAudioClient3 流，请求驱动支持的最小周期，所有应用随之受益。
 - **音量**：loopback 位于软件端点音量/静音之后、硬件音量/静音之前；发送端按 `QueryHardwareSupport` 只补上硬件实现的部分，Windows 音量和静音在各类设备上表现一致。
 - **保持连接**：配置写入 `--idle-ms 0`，选择 NAS 输出期间持续发送（含静音），NAS 配合 `DESKTOP_KEEP_AWAKE` 让 DAC 一直保持唤醒，播放前不再有唤醒噪声；关机或切到其他输出后停止发送，NAS 在 `OUTPUT_IDLE_SUSPEND_MS` 后让 DAC 休眠。约 1.6 Mbit/s。
+- **音量一致**：“NAS 音频”与“NAS 音频（备用）”共用一个音量和静音状态。调节其中任一个（音量滑块或静音），另一个立即跟随；备用设备重新出现时（如显示器唤醒）按最近的共同音量对齐。可用 `--no-volume-sync` 关闭。
 - **仅 NAS 输出**：默认输出不是“NAS 音频”时（例如切到耳机），发送端待机，不采集也不发送。
 - **设备变化**：跟随默认播放设备，设备失效时自动重开。首选端点重新出现时切回；默认设备消失后 Windows 改选了非首选设备时，换成下一个首选端点；首选设备仍在时用户手动选择的其他设备会被保留。
 - **优先级**：采集线程注册 MMCSS “Pro Audio”。
@@ -35,7 +36,7 @@ PowerShell 中可传参数，例如 `./scripts/windows-audio.ps1 -Address 192.16
 ```text
 vban-sender --target IPv4 [--port 6980] [--stream Windows] [--device ENDPOINT_ID]
             [--prefer ENDPOINT_ID ...] [--frames 128] [--idle-ms 2000|0]
-            [--no-endpoint-volume] [--no-keeper] [--stats-ms 0] [--log FILE]
+            [--no-endpoint-volume] [--no-keeper] [--no-volume-sync] [--stats-ms 0] [--log FILE]
 vban-sender --config FILE    # 每行一个参数
 vban-sender --list           # 每个活动播放端点一行 JSON，含 min_frames
 vban-sender --stop           # 让正在运行的实例正常退出

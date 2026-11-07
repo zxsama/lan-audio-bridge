@@ -50,6 +50,7 @@ struct Options {
     unsigned frames = 128;      // VBAN frames per datagram, 1..256
     bool endpoint_volume = true;
     bool keeper = true;         // hold the endpoint's minimum engine period
+    bool volume_sync = true;    // keep all preferred endpoints at the same volume/mute
     unsigned idle_ms = 2000;    // stop sending digital silence after this long; 0 = keep the stream connected
     unsigned stats_ms = 0;
     bool list = false;
@@ -70,6 +71,7 @@ std::atomic<float> g_gain{1.0f};
 std::atomic<bool> g_mute{false};
 std::atomic<DWORD> g_hardware{0};  // ENDPOINT_HARDWARE_SUPPORT_* of the captured endpoint
 HANDLE g_stop = nullptr, g_reopen = nullptr, g_policy = nullptr;
+HANDLE g_volume_devices = nullptr, g_volume_changed = nullptr;  // volume sync wake-ups
 HANDLE g_log = INVALID_HANDLE_VALUE;
 SRWLOCK g_log_lock = SRWLOCK_INIT;
 Options g_opt;
@@ -143,9 +145,10 @@ public:
         }
         return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR, DWORD) override { if (g_policy) SetEvent(g_policy); return S_OK; }
-    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override { if (g_policy) SetEvent(g_policy); return S_OK; }
-    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) override { if (g_policy) SetEvent(g_policy); return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR, DWORD) override { wake(); return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override { wake(); return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) override { wake(); return S_OK; }
+    static void wake() { if (g_policy) SetEvent(g_policy); if (g_volume_devices) SetEvent(g_volume_devices); }
     HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
 };
 
@@ -208,6 +211,117 @@ DWORD WINAPI policy_thread(LPVOID) {
         wcsncpy_s(previous, current, _TRUNCATE);
         first = false;
     }
+    release(enumerator);
+    CoUninitialize();
+    return 0;
+}
+
+// Keeps every preferred endpoint at one shared volume and mute, so the NAS
+// outputs ("NAS audio" and its backup) behave like a single device. Changes
+// made here carry kSyncContext and are ignored when they echo back.
+const GUID kSyncContext = {0x6c1f3d2a, 0x47b9, 0x4e8e, {0x9a, 0x21, 0x5d, 0x0b, 0x8f, 0x37, 0xc2, 0x64}};
+struct SharedVolume { float scalar = 0; BOOL mute = FALSE; bool valid = false; int source = -1; };
+SRWLOCK g_shared_lock = SRWLOCK_INIT;
+SharedVolume g_shared;
+
+class SyncEvents final : public IAudioEndpointVolumeCallback {
+    std::atomic<ULONG> refs{1};
+    int index;
+public:
+    explicit SyncEvents(int i) : index(i) {}
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() override { ULONG n = --refs; if (!n) delete this; return n; }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override {
+        if (iid == __uuidof(IUnknown) || iid == __uuidof(IAudioEndpointVolumeCallback)) { *out = this; AddRef(); return S_OK; }
+        *out = nullptr; return E_NOINTERFACE;
+    }
+    HRESULT STDMETHODCALLTYPE OnNotify(PAUDIO_VOLUME_NOTIFICATION_DATA data) override {
+        if (IsEqualGUID(data->guidEventContext, kSyncContext)) return S_OK;  // our own change
+        AcquireSRWLockExclusive(&g_shared_lock);
+        g_shared.scalar = data->fMasterVolume; g_shared.mute = data->bMuted; g_shared.valid = true; g_shared.source = index;
+        ReleaseSRWLockExclusive(&g_shared_lock);
+        SetEvent(g_volume_changed);
+        return S_OK;
+    }
+};
+
+DWORD WINAPI volume_sync_thread(LPVOID) {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    IMMDeviceEnumerator *enumerator = nullptr;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void **)&enumerator))) {
+        CoUninitialize(); return 1;
+    }
+    IAudioEndpointVolume *volume[Options::kMaxPrefer] = {};
+    SyncEvents *events[Options::kMaxPrefer] = {};
+    auto close_all = [&] {
+        for (unsigned i = 0; i < g_opt.prefer_count; i++) {
+            if (volume[i] && events[i]) volume[i]->UnregisterControlChangeNotify(events[i]);
+            release(events[i]); release(volume[i]);
+        }
+    };
+    auto open_all = [&] {
+        close_all();
+        for (unsigned i = 0; i < g_opt.prefer_count; i++) {
+            IMMDevice *d = nullptr; DWORD state = 0;
+            if (SUCCEEDED(enumerator->GetDevice(g_opt.prefer[i], &d)) && SUCCEEDED(d->GetState(&state)) && state == DEVICE_STATE_ACTIVE &&
+                SUCCEEDED(d->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, (void **)&volume[i]))) {
+                events[i] = new SyncEvents((int)i);
+                volume[i]->RegisterControlChangeNotify(events[i]);
+            }
+            release(d);
+        }
+    };
+    auto apply = [&](const char *reason) {
+        AcquireSRWLockShared(&g_shared_lock);
+        SharedVolume shared = g_shared;
+        ReleaseSRWLockShared(&g_shared_lock);
+        if (!shared.valid) return;
+        unsigned changed = 0;
+        for (unsigned i = 0; i < g_opt.prefer_count; i++) {
+            if (!volume[i] || (int)i == shared.source) continue;
+            float scalar = 0; BOOL mute = FALSE;
+            volume[i]->GetMasterVolumeLevelScalar(&scalar); volume[i]->GetMute(&mute);
+            if (std::fabs(scalar - shared.scalar) > 0.001f) { volume[i]->SetMasterVolumeLevelScalar(shared.scalar, &kSyncContext); changed++; }
+            if ((mute != FALSE) != (shared.mute != FALSE)) { volume[i]->SetMute(shared.mute, &kSyncContext); changed++; }
+        }
+        if (changed) log("{\"event\":\"volume_sync\",\"reason\":\"%s\",\"scalar\":%.3f,\"mute\":%s,\"source\":%d}\n",
+                         reason, shared.scalar, shared.mute ? "true" : "false", shared.source);
+    };
+    open_all();
+    // Startup: the current default output (if preferred) leads, otherwise the first active one.
+    {
+        int leader = -1;
+        IMMDevice *d = nullptr; LPWSTR id = nullptr;
+        if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &d)) && SUCCEEDED(d->GetId(&id))) {
+            for (unsigned i = 0; i < g_opt.prefer_count; i++) if (volume[i] && !_wcsicmp(id, g_opt.prefer[i])) leader = (int)i;
+            CoTaskMemFree(id);
+        }
+        release(d);
+        for (unsigned i = 0; i < g_opt.prefer_count && leader < 0; i++) if (volume[i]) leader = (int)i;
+        if (leader >= 0) {
+            float scalar = 0; BOOL mute = FALSE;
+            volume[leader]->GetMasterVolumeLevelScalar(&scalar); volume[leader]->GetMute(&mute);
+            AcquireSRWLockExclusive(&g_shared_lock);
+            g_shared.scalar = scalar; g_shared.mute = mute; g_shared.valid = true; g_shared.source = leader;
+            ReleaseSRWLockExclusive(&g_shared_lock);
+            apply("startup");
+        }
+    }
+    HANDLE waits[3] = {g_stop, g_volume_changed, g_volume_devices};
+    for (;;) {
+        DWORD w = WaitForMultipleObjects(3, waits, FALSE, INFINITE);
+        if (w == WAIT_OBJECT_0) break;
+        if (w == WAIT_OBJECT_0 + 1) { apply("changed"); continue; }
+        // A preferred endpoint may have (re)appeared with its own stored volume: align it.
+        if (WaitForSingleObject(g_stop, 500) == WAIT_OBJECT_0) break;
+        ResetEvent(g_volume_devices);
+        open_all();
+        AcquireSRWLockExclusive(&g_shared_lock);
+        g_shared.source = -1;  // every endpoint follows the last shared value
+        ReleaseSRWLockExclusive(&g_shared_lock);
+        apply("device");
+    }
+    close_all();
     release(enumerator);
     CoUninitialize();
     return 0;
@@ -510,7 +624,7 @@ bool parse_unsigned(const wchar_t *s, unsigned low, unsigned high, unsigned &out
 int usage() {
     log("usage: vban-sender --target IPv4 [--port 6980] [--stream Windows] [--device ENDPOINT_ID]\n"
         "                   [--prefer ENDPOINT_ID ...] [--frames 128] [--idle-ms 2000]\n"
-        "                   [--no-endpoint-volume] [--no-keeper] [--stats-ms 0] [--log FILE] | --config FILE | --list | --stop\n");
+        "                   [--no-endpoint-volume] [--no-keeper] [--no-volume-sync] [--stats-ms 0] [--log FILE] | --config FILE | --list | --stop\n");
     return 2;
 }
 
@@ -595,6 +709,7 @@ int wmain(int argc, wchar_t **argv) {
         if (!wcscmp(a, L"--list")) { g_opt.list = true; continue; }
         if (!wcscmp(a, L"--no-endpoint-volume")) { g_opt.endpoint_volume = false; continue; }
         if (!wcscmp(a, L"--no-keeper")) { g_opt.keeper = false; continue; }
+        if (!wcscmp(a, L"--no-volume-sync")) { g_opt.volume_sync = false; continue; }
         if (!wcscmp(a, L"--stop")) {
             // Graceful stop of the running instance (it has no window or console).
             HANDLE e = OpenEventW(EVENT_MODIFY_STATE, FALSE, kStopEventName);
@@ -652,6 +767,12 @@ int wmain(int argc, wchar_t **argv) {
         g_policy = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         policy = CreateThread(nullptr, 0, policy_thread, nullptr, 0, nullptr);
     }
+    HANDLE volume_sync = nullptr;
+    if (g_opt.volume_sync && g_opt.prefer_count >= 2) {
+        g_volume_devices = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        g_volume_changed = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        volume_sync = CreateThread(nullptr, 0, volume_sync_thread, nullptr, 0, nullptr);
+    }
 
     DWORD task = 0; HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task);
     if (mmcss) AvSetMmThreadPriority(mmcss, AVRT_PRIORITY_CRITICAL);
@@ -668,6 +789,7 @@ int wmain(int argc, wchar_t **argv) {
     if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
     if (stats) { WaitForSingleObject(stats, 2000); CloseHandle(stats); }
     if (policy) { WaitForSingleObject(policy, 2000); CloseHandle(policy); }
+    if (volume_sync) { WaitForSingleObject(volume_sync, 2000); CloseHandle(volume_sync); }
     enumerator->UnregisterEndpointNotificationCallback(device_events);
     device_events->Release(); enumerator->Release();
     closesocket(sender.sock); WSACleanup(); CoUninitialize();
