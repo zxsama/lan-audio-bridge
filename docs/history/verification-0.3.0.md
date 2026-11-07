@@ -43,4 +43,4 @@
 - `pactl` 带负号的 dB 参数是相对调整，会在每次切换时继续降低音量。混音增益改用绝对 Pulse 音量，录音验证多次切换后的幅度保持一致。
 - 握手前的短通知不再被普通实时队列时限提前删除；停止时保留路由直到下游缓冲排空。
 
-实现依据：[VBAN PCM 规范](https://vb-audio.com/Voicemeeter/VBANProtocol_Specifications.pdf)、[PulseAudio null sink 源码](https://github.com/pulseaudio/pulseaudio/blob/v17.0/src/modules/module-null-sink.c)。协议接收、运行时和实际音频测试均随仓库提供；复现方式见[开发文档](development.md)。
+实现依据：[VBAN PCM 规范](https://vb-audio.com/Voicemeeter/VBANProtocol_Specifications.pdf)、[PulseAudio null sink 源码](https://github.com/pulseaudio/pulseaudio/blob/v17.0/src/modules/module-null-sink.c)。协议接收、运行时和实际音频测试均随仓库提供；复现方式见[开发文档](../development.md)。

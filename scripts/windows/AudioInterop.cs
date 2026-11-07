@@ -24,14 +24,19 @@ namespace LanAudioBridge.WindowsAudio
     public static class Endpoints
     {
         // Roles: 0 = console, 1 = multimedia, 2 = communications.
-        public static EndpointInfo[] ListRender()
+        public static EndpointInfo[] ListRender() { return List(0); }
+
+        // Recording endpoints (flow 1), for example to replace a virtual default microphone.
+        public static EndpointInfo[] ListCapture() { return List(1); }
+
+        private static EndpointInfo[] List(int flow)
         {
             IMMDeviceEnumerator enumerator = null;
             IMMDeviceCollection devices = null;
             try
             {
                 enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
-                Check(enumerator.EnumAudioEndpoints(0, 15, out devices), "Enumerate render endpoints");
+                Check(enumerator.EnumAudioEndpoints(flow, 15, out devices), "Enumerate audio endpoints");
                 uint count;
                 Check(devices.GetCount(out count), "Count render endpoints");
                 List<EndpointInfo> result = new List<EndpointInfo>();
@@ -114,7 +119,11 @@ namespace LanAudioBridge.WindowsAudio
 
         private static readonly PropertyKey DeviceDescription = new PropertyKey(new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), 2);
 
-        public static string GetDefault(int role)
+        public static string GetDefault(int role) { return GetDefault(0, role); }
+
+        public static string GetDefaultCapture(int role) { return GetDefault(1, role); }
+
+        private static string GetDefault(int flow, int role)
         {
             ValidateRole(role);
             IMMDeviceEnumerator enumerator = null;
@@ -122,9 +131,9 @@ namespace LanAudioBridge.WindowsAudio
             try
             {
                 enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
-                int hr = enumerator.GetDefaultAudioEndpoint(0, role, out device);
+                int hr = enumerator.GetDefaultAudioEndpoint(flow, role, out device);
                 if (hr == unchecked((int)0x80070490)) return null; // No default exists.
-                Check(hr, "Read default render endpoint");
+                Check(hr, "Read default endpoint");
                 string id;
                 Check(device.GetId(out id), "Read default endpoint ID");
                 return id;

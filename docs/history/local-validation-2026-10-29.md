@@ -12,7 +12,7 @@
 - `scripts/local.ps1` 的 Start、重复 Start、Status、Stop、再次 Start 均通过。重复启动不重复保活；停止后保活退出，重启后 DLNA UUID 保留。
 - 移除临时 WSL 保活会话后，75 秒后的复查显示同一个测试容器仍 healthy，重启次数为 0，HTTP 仍为 200；部署脚本创建的隐藏保活进程仍在运行。
 
-Windows 重启或 WSL 被手动关闭后，需重新运行 `scripts/local.ps1 Start`；没有安装系统开机启动服务。具体操作见 [本机部署说明](local-deployment.md)。
+Windows 重启或 WSL 被手动关闭后，需重新运行 `scripts/local.ps1 Start`；没有安装系统开机启动服务。具体操作见 [本机部署说明](../local-deployment.md)。
 
 ## 已完成验证
 
@@ -37,4 +37,4 @@ Windows 重启或 WSL 被手动关闭后，需重新运行 `scripts/local.ps1 St
 - 验证环境的 WSL 使用 NAT。Docker 网络内的 mDNS/SSDP 成功，不证明手机能够跨 Windows/WSL 边界发现设备。
 - 未验证 QQ 音乐/网易云的手机版本兼容性、受权限限制的曲目、USB 音频适配器的 UAC/采样率、USB 光纤出声或硬件重连。
 
-详细命令输出保存在本地忽略目录 `test-results/`；它们不是公开发布文件。原验收方法见 [验证记录](verification.md)，真实传音方法和协议模式差异见 [AirPlay 发送测试](airplay-sender-validation.md)。
+详细命令输出保存在本地忽略目录 `test-results/`；它们不是公开发布文件。原验收方法见 [验证记录](verification-0.1.0.md)，真实传音方法和协议模式差异见 [AirPlay 发送测试](airplay-sender-validation.md)。

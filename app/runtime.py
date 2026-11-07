@@ -407,6 +407,76 @@ class Snapshot:
     active_ids: dict[str, set[int]]
 
 
+class PulseEvents:
+    """One long-lived `pactl subscribe`: the stream inventory is re-read only
+    after a sink or sink-input event, plus a periodic safety refresh. Replaces
+    spawning two pactl processes per 50 ms coordinator step."""
+
+    EVENT = re.compile(r"^Event '(new|change|remove)' on (sink|sink-input) #([0-9]+)$")
+
+    def __init__(self, popen: Callable = subprocess.Popen, refresh_seconds: float = 2.0):
+        self.popen = popen
+        self.refresh_seconds = refresh_seconds
+        self.process: subprocess.Popen | None = None
+        self.pending = b""
+        self.next_start = 0.0
+        self.last_full = float("-inf")
+
+    def _start(self, now: float) -> None:
+        if now < self.next_start:
+            return
+        self.next_start = now + 1.0
+        try:
+            self.process = self.popen(["pactl", "--server=" + PULSE_SERVER, "subscribe"],
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL, env=child_environment(),
+                                      start_new_session=True)
+            os.set_blocking(self.process.stdout.fileno(), False)
+        except OSError:
+            self.process = None
+        self.pending = b""
+
+    def dirty(self, now: float, ignored_inputs: set[int] = frozenset()) -> bool:
+        """True when the cached inventory may be stale. Unavailable subscription = always stale."""
+        changed = now - self.last_full >= self.refresh_seconds
+        if self.process is None or self.process.poll() is not None:
+            self.close()
+            self._start(now)
+            return True
+        while True:
+            try:
+                data = os.read(self.process.stdout.fileno(), 65536)
+            except BlockingIOError:
+                break
+            except OSError:
+                data = b""
+            if not data:  # EOF: subscriber exited; restart on the next call
+                self.close()
+                return True
+            self.pending += data
+        *lines, self.pending = self.pending.split(b"\n")
+        for line in lines:
+            match = self.EVENT.match(line.decode("ascii", "replace").strip())
+            if match and not (match[2] == "sink-input" and int(match[3]) in ignored_inputs):
+                changed = True
+        return changed
+
+    def refreshed(self, now: float) -> None:
+        self.last_full = now
+
+    def close(self) -> None:
+        if self.process is not None:
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+            if self.process.stdout:
+                self.process.stdout.close()
+        self.process = None
+
+
 class Pulse:
     def __init__(self, runner: Callable = subprocess.run, latency_ms: int = 200,
                  desktop_enabled: bool = False, desktop_volume: int = 100,
@@ -419,6 +489,12 @@ class Pulse:
         self.desktop_volume = desktop_volume
         self.desktop_latency_ms = desktop_latency_ms
         self.defer_gain_refresh = False
+        self.events: PulseEvents | None = None
+        self._snapshot: Snapshot | None = None
+
+    def _ignored_inputs(self) -> set[int]:
+        """Sink-inputs whose events do not affect phone arbitration."""
+        return set()
 
     @property
     def desktop_active(self) -> bool:
@@ -435,6 +511,8 @@ class Pulse:
         return bool(valid and int(module) in allowed)
 
     def command(self, *arguments: str) -> str:
+        if arguments[:1] != ("--format=json",):
+            self._snapshot = None  # our own change: re-read the inventory next step
         try:
             result = self.runner(["pactl", "--server=" + PULSE_SERVER, *arguments],
                                  capture_output=True, text=True, timeout=2, check=False,
@@ -456,6 +534,16 @@ class Pulse:
             raise BridgeError("PulseAudio returned an invalid JSON inventory") from None
 
     def snapshot(self) -> Snapshot:
+        if self.events is not None:
+            now = time.monotonic()
+            if not self.events.dirty(now, self._ignored_inputs()) and self._snapshot is not None:
+                return self._snapshot
+            self._snapshot = self._read_snapshot()
+            self.events.refreshed(now)
+            return self._snapshot
+        return self._read_snapshot()
+
+    def _read_snapshot(self) -> Snapshot:
         try:
             sinks = {int(sink["index"]): sink["name"] for sink in self.listing("sinks")}
             required = {"output", "discard", *(source + "_bus" for source in SOURCES)}
@@ -972,6 +1060,8 @@ class Runtime:
                             core=True, context=self.pulse_context)
         self.wait_ready(lambda: bool(self.pulse.snapshot()))
         self.pulse.clear()
+        # From now on the coordinator re-reads streams only after Pulse events.
+        self.pulse.events = PulseEvents()
         if "airplay" in self.config.enabled:
             # Shared memory is lazily recreated when Shairport first contacts nqptp.
             Path("/dev/shm/nqptp").unlink(missing_ok=True)
@@ -1013,6 +1103,8 @@ class Runtime:
                 except BridgeError:
                     pass
             self.coordinator.owner = None
+            if self.pulse.events is not None:
+                self.pulse.events.close()
             self.supervisor.shutdown()
             self.state = "failed" if failed else "stopped"
             if self.lock_acquired:

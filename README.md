@@ -54,6 +54,7 @@ docker compose -f compose.yaml -f compose.host-avahi.yaml up -d
 - [Windows 一键配置](docs/windows-setup.md)
 - [运维与验收](docs/operations.md)
 - [开发与测试](docs/development.md)
+- [延迟验证](docs/latency.md)与[测量工具](tools/latency/README.md)
 - [上游组件与构建来源](docs/UPSTREAM.md)
 
 ## 许可证

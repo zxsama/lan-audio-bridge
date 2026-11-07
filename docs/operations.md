@@ -65,7 +65,7 @@ CLI 与 TrueNAS UI 应选择一个作为同一实例的管理入口。以下命�
 
 ## 容器内访问与状态
 
-PulseAudio 使用专用 `pulse` 系统账户，由 `dbus-run-session` 提供私有会话总线；HOME 和运行目录由该账户持有。Unix 音频 socket 仅供容器内访问，禁用未使用的 cookie 认证，动态模块加载用于音源切换。硬件模式按 `/dev/snd` 字符设备的实际组号授予访问权，无需放宽宿主 D-Bus 权限。相关验证见 [0.1.2 记录](verification-0.1.2.md)。
+PulseAudio 使用专用 `pulse` 系统账户，由 `dbus-run-session` 提供私有会话总线；HOME 和运行目录由该账户持有。Unix 音频 socket 仅供容器内访问，禁用未使用的 cookie 认证，动态模块加载用于音源切换。硬件模式按 `/dev/snd` 字符设备的实际组号授予访问权，无需放宽宿主 D-Bus 权限。相关验证见 [0.1.2 记录](history/verification-0.1.2.md)。
 
 ## 更新和回退
 

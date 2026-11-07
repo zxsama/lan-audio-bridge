@@ -193,8 +193,7 @@ media-period underruns and only the ordinary 0.0208 ms zero-crossing sample.
 Its initial run exposed the startup deadline still using the 16 ms request;
 waiting for the actually negotiated client fill fixed that floor-specific underrun.
 
-The corresponding local artifacts are `test-results/native-vban/target-negative-120s-q5`,
-`target-positive-120s-q5`, and `target-floor20-prefill-30s`. The fixed-floor fixture
+(Raw run outputs were kept locally and are not part of the repository.) The fixed-floor fixture
 does not establish behavior for devices whose required scheduling quantum exceeds
 the receiver's 40 ms client queue cap.
 This is evidence for that local software setup, not a guarantee for a physical

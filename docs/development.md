@@ -55,7 +55,7 @@ docker compose -f compose.test.yaml down
 - `integration.py` 向真实 PulseAudio 四个输入总线注入不同频率音频，在 `output.monitor` 录音并检查唯一音源，再通过 DLNA SOAP 验证 HTTP WAV 播放、暂停、Seek 和停止。
 - `recovery.py` 主动终止测试接收进程和 Pulse 进程，检查监督重启、核心故障退出、容器重启后的持久身份与空闲状态，以及正常停止；仅针对独立 null 输出测试实例运行。
 - `discovery.py` 从独立容器检查 mDNS、SSDP 与公告端点。
-- `airplay_sender.py` 在临时容器下载固定版本发送端依赖，发送 RAOP/AirPlay 1 音频，完成后自动清理；不代表 AirPlay 2 传音通过，见 [AirPlay 发送测试](airplay-sender-validation.md)。
+- `airplay_sender.py` 在临时容器下载固定版本发送端依赖，发送 RAOP/AirPlay 1 音频，完成后自动清理；不代表 AirPlay 2 传音通过，见 [AirPlay 发送测试](history/airplay-sender-validation.md)。
 
 测试失败后先保留日志并检查测试容器；无论结果如何，都应停止测试实例。
 
@@ -89,9 +89,9 @@ python3 -B tests/host_avahi.py --image lan-audio-bridge:0.5.0
 
 新增 `tests/dlna_jitter.py --format wav` 和 `--format flac`：在隔离 null 容器内模拟 HTTP 500ms 停顿，检查持续 PCM、路由和 Pause/Resume/Seek/Stop。`--label` 仅标记输出，`--container` 选择已经启动的隔离测试容器。妙播模拟发送测试见 [miplay.md](miplay.md)。
 
-0.2.1 增加 `tests/test_miplay_presence.py` 的真实 TCP 超时/状态回归，以及 `python3 tests/miplay_presence.py` 的独立容器 40 秒持续发现检查。后者仅发送认证、心跳和查询，不发送 OPEN、不播放媒体；要求已启动独立 `compose.test.yaml`，自动清理观察者。见 [0.2.1 验证](verification-0.2.1.md)。
+0.2.1 增加 `tests/test_miplay_presence.py` 的真实 TCP 超时/状态回归，以及 `python3 tests/miplay_presence.py` 的独立容器 40 秒持续发现检查。后者仅发送认证、心跳和查询，不发送 OPEN、不播放媒体；要求已启动独立 `compose.test.yaml`，自动清理观察者。见 [0.2.1 验证](history/verification-0.2.1.md)。
 
-0.2.2 增加 `tests/test_miplay_volume.py` 的跨连接音量和并发等待回归，以及 `tests/miplay_volume.py` 的真实服务/输入总线一致性检查。`integration.py` 同时验证输出挂起、恢复和 70%/100% 的实际幅度差异。测试方法与结果见 [0.2.2 验证](verification-0.2.2.md)。
+0.2.2 增加 `tests/test_miplay_volume.py` 的跨连接音量和并发等待回归，以及 `tests/miplay_volume.py` 的真实服务/输入总线一致性检查。`integration.py` 同时验证输出挂起、恢复和 70%/100% 的实际幅度差异。测试方法与结果见 [0.2.2 验证](history/verification-0.2.2.md)。
 
 ## VBAN 与双路混音
 
@@ -107,11 +107,13 @@ docker compose -f compose.desktop-test.yaml down
 
 该独立配置在容器内发送 UDP VBAN 音频，并录制 `output.monitor`。验证电脑单独输出、与四手机总线混音、十二种手机切换、独立停止与音量、短提示音恢复和数字静音挂起。它不会安装 Windows 驱动或向物理设备播放。软件链路延迟与真实 Windows 到音响的端到端延迟须分别报告。
 
-0.3.0 的本机验证结果及延迟测量范围见 [0.3.0 验证](verification-0.3.0.md)。
+0.3.0 的本机验证结果及延迟测量范围见 [0.3.0 验证](history/verification-0.3.0.md)。
 
-Windows 音量、托盘、接收队列及单调时钟修复的结果见 [0.3.1 验证](verification-0.3.1.md)。
+Windows 音量、托盘、接收队列及单调时钟修复的结果见 [0.3.1 验证](history/verification-0.3.1.md)。
 
-原生接收器及完整应用回归结果见 [0.4.0 验证](verification-0.4.0.md)。
+原生接收器及完整应用回归结果见 [0.4.0 验证](history/verification-0.4.0.md)。
+
+0.5.0（Windows 原生发送端、低延迟输出与诊断）的结果见 [0.5.0 验证](history/verification-0.5.0.md)。历次版本记录均在 [docs/history](history/)。
 
 ### 原生接收后端
 
@@ -137,7 +139,7 @@ docker compose -f compose.e2e-test.yaml exec -T audio python3 /workspace/tests/n
 docker compose -f compose.e2e-test.yaml down --volumes
 ```
 
-`--burst-ms` 模拟 WASAPI loopback 按引擎周期整块交付。`native_watch.py` 每 50 ms 读取接收器 STATUS，输出队列、延迟、调速和欠载时间序列。`e2e_echo.py` 在容器内检测 `output.monitor` 上的标记起点并经 UDP 回传，供发送端用自己的时钟计时；WSL2 时钟相对 Windows 漂移，Windows 发送到 WSL 接收的结果不代表真实设备，只能用于功能检查。
+`--burst-ms` 模拟 WASAPI loopback 按引擎周期整块交付，`--stall-ms` 周期性冻结私有 Pulse 以模拟设备停顿，`--keep-awake` 检查电脑连接期间输出保持唤醒。`native_watch.py` 每 50 ms 读取接收器 STATUS，输出队列、延迟、调速和欠载时间序列。WSL2 时钟相对 Windows 漂移 1–3 %，从 Windows 向 WSL 接收端发送的计时结果不代表真实设备；发送端须与接收端处于同一时钟域。真实设备上的端到端测量与 NAS 诊断见 [延迟测量工具](../tools/latency/README.md)。
 
 ## Windows 配置与发送端
 

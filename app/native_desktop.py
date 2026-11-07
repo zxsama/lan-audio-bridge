@@ -70,6 +70,11 @@ class NativeDesktopMixin:
             return self.native_input is None or stream["index"] == self.native_input
         return super()._allowed_output_stream(stream)
 
+    def _ignored_inputs(self):
+        # The receiver's own stream changes rate up to ten times per second;
+        # its state is tracked through the control socket, not the inventory.
+        return {self.native_input} if self.native_input is not None else set()
+
     def _native_command(self, command, timeout=2.0):
         value = request(self.control_path, command, timeout)
         if value["pid"] != self.receiver_pid:

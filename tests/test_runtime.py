@@ -1,5 +1,6 @@
 """Standard-library tests for arbitration, supervisor failures and safe config."""
 import itertools
+import os
 import json
 from pathlib import Path
 import signal
@@ -12,7 +13,7 @@ import uuid
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
-from runtime import (BridgeError, Child, Config, Coordinator, Pulse, Runtime, SOURCES,
+from runtime import (BridgeError, Child, Config, Coordinator, Pulse, PulseEvents, Runtime, SOURCES,
                      Snapshot, Supervisor, atomic_write, avahi_config, child_environment,
                      owns_udp_ports, persistent_machine_id, persistent_uuid, pulse_config, pulse_context,
                      receiver_commands, shairport_config)
@@ -218,6 +219,66 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(text.count("module-alsa-sink"), 1)
         self.assertIn("device=hw:CARD=USB,DEV=0", text)
         self.assertNotIn("tsched=0", text)
+
+    def test_pulse_events_refresh_inventory_only_after_relevant_events(self):
+        read_fd, write_fd = os.pipe()
+
+        class Subscriber:
+            def __init__(self):
+                self.stdout = os.fdopen(read_fd, "rb", buffering=0)
+                self.alive = True
+            def poll(self):
+                return None if self.alive else 0
+            def terminate(self):
+                self.alive = False
+            def wait(self, timeout=None):
+                return 0
+
+        started = []
+        def popen(argv, **kwargs):
+            started.append(argv)
+            return Subscriber()
+
+        listings = []
+        def run(argv, **kwargs):
+            if argv[-2:] == ["list", "sinks"]:
+                listings.append("sinks")
+                out = [{"index": i, "name": n} for i, n in enumerate(
+                    ["output", "discard", "airplay_bus", "dlna_bus", "spotify_bus", "miplay_bus"])]
+            elif argv[-2:] == ["list", "sink-inputs"]:
+                out = []
+            else:
+                out = ""
+            return subprocess.CompletedProcess(argv, 0, json.dumps(out) if out != "" else "", "")
+
+        pulse = Pulse(run)
+        events = PulseEvents(popen, refresh_seconds=3600)
+        pulse.events = events
+        pulse.snapshot()
+        self.assertEqual(started[0][-1], "subscribe")
+        self.assertEqual(len(listings), 1)
+        pulse.snapshot()
+        self.assertEqual(len(listings), 1, "No event: cached inventory reused")
+        os.write(write_fd, b"Event 'change' on client #3\nEvent 'new' on source-output #9\n")
+        pulse.snapshot()
+        self.assertEqual(len(listings), 1, "Unrelated events are ignored")
+        os.write(write_fd, b"Event 'change' on sink-input #7\n")
+        pulse.snapshot()
+        self.assertEqual(len(listings), 2, "Sink-input event refreshes")
+        pulse._ignored_inputs = lambda: {7}
+        os.write(write_fd, b"Event 'change' on sink-input #7\nEvent 'chan")
+        pulse.snapshot()
+        self.assertEqual(len(listings), 2, "Ignored stream and partial line do not refresh")
+        os.write(write_fd, b"ge' on sink #1\n")
+        pulse.snapshot()
+        self.assertEqual(len(listings), 3, "Line completed across reads is parsed")
+        pulse.command("set-sink-mute", "output", "1")
+        pulse.snapshot()
+        self.assertEqual(len(listings), 4, "Own commands invalidate the cache")
+        os.close(write_fd)
+        pulse.snapshot()
+        self.assertEqual(len(listings), 5, "Subscriber EOF falls back to a fresh listing")
+        events.close()
 
     def test_interrupt_scheduling_bounds_the_hardware_queue(self):
         config = Config.from_env({"AUDIO_DEVICE": "plughw:CARD=DAC,DEV=0", "OUTPUT_SCHEDULING": "interrupt",

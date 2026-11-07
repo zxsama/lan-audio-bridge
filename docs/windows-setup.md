@@ -16,7 +16,7 @@ PowerShell 中可传参数，例如 `./scripts/windows-audio.ps1 -Address 192.16
 1. **低延迟驱动**：列出当前有活动输出、且能换用 Microsoft 类驱动获得更小引擎周期的设备，确认后更换。规则只覆盖 HDMI/DP 显示音频（NVIDIA、AMD、Intel，改用 `hdaudio.inf`）和 USB Audio 2.0 设备（改用 `usbaudio2.inf`）；原厂驱动包记录在案，`Restore` 时装回。
 2. **选择输出**：按最小引擎周期选取主输出，排除 Voicemeeter、虚拟声卡和蓝牙。主输出是显示器音频时（显示器休眠会消失），备用输出取一个常在的非显示器设备。重复运行时沿用上次的选择，也可用 `-Prefer` 指定。
 3. **清晰命名**：把主、备用输出的设备描述改为“NAS 音频”和“NAS 音频（备用）”，原名称记录在案。
-4. **停用旧方案**：关闭正在运行的 Voicemeeter 的 VBAN 输出并结束其进程，移除旧版 Voicemeeter 配置脚本的登录启动项和 `%LOCALAPPDATA%\LanAudioBridge\WindowsAudio`，隐藏 Voicemeeter 的播放端点。Voicemeeter 本身不会被卸载，不再需要时可在“应用”中卸载。
+4. **停用旧方案**：关闭正在运行的 Voicemeeter 的 VBAN 输出并结束其进程，移除旧版 Voicemeeter 配置脚本的登录启动项和 `%LOCALAPPDATA%\LanAudioBridge\WindowsAudio`，隐藏 Voicemeeter 的播放和录音端点。默认麦克风若是 Voicemeeter（停止后只会录到静音），改为第一个非蓝牙的真实麦克风。Voicemeeter 本身不会被卸载，不再需要时可在“应用”中卸载。
 5. **发送端**：复制 `vban-sender.exe` 到 `%LOCALAPPDATA%\LanAudioBridge\Sender\`，写入 `sender.conf`，添加 `LanAudioBridgeSender` 登录启动项，立即在后台启动并确认采集已开始。
 
 首次运行时备份默认播放设备、启动项与 Voicemeeter 的 VBAN 开关到 `original.json`；之后的每项改动（驱动、名称、隐藏的端点）都追加记录。`Restore` 按记录恢复：先改回名称，再装回原厂驱动，显示被隐藏的端点，恢复仍存在的默认设备，重新启动原先运行的 Voicemeeter，并删除发送端文件。中途失败时保留记录，可再次运行 `Restore`；配置中途失败时会用上一份配置重新启动发送端。

@@ -47,7 +47,7 @@ function Read-State {
     if (-not (Test-Path -LiteralPath $statePath)) { return $null }
     $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
     # Schema 1 (sender-only) lacked driver, name and visibility records.
-    foreach ($field in @('Drivers', 'Descriptions', 'Hidden')) {
+    foreach ($field in @('Drivers', 'Descriptions', 'Hidden', 'CaptureDefaults')) {
         if (-not $state.PSObject.Properties[$field]) { $state | Add-Member -NotePropertyName $field -NotePropertyValue @() }
     }
     if (-not $state.PSObject.Properties['VoicemeeterWasRunning']) { $state | Add-Member -NotePropertyName VoicemeeterWasRunning -NotePropertyValue $false }
@@ -237,7 +237,7 @@ function Invoke-Setup {
         $state = [pscustomobject][ordered]@{ Schema = 2; Time = (Get-Date).ToString('o')
             Defaults = @(0..2 | ForEach-Object { [pscustomobject]@{ Role = $_; Id = $endpoints::GetDefault($_) } })
             SenderRun = Get-RunValue $senderRunName; VoicemeeterRun = Get-RunValue $legacyRunName; VbanEnable = $null
-            VoicemeeterWasRunning = $false; Drivers = @(); Descriptions = @(); Hidden = @() }
+            VoicemeeterWasRunning = $false; Drivers = @(); Descriptions = @(); Hidden = @(); CaptureDefaults = @() }
     }
     if (-not $Address -and (Test-Path -LiteralPath $configPath)) {
         $lines = @(Get-Content -LiteralPath $configPath)
@@ -312,7 +312,19 @@ function Invoke-Setup {
     $running = @(Get-Process -Name 'voicemeeter*' -ErrorAction SilentlyContinue)
     if ($running.Count) { $state.VoicemeeterWasRunning = $true; $running | Stop-Process -Force }
     Set-RunValue $legacyRunName $null
-    foreach ($endpoint in @($endpoints::ListRender() | Where-Object { $_.Active -and $_.Name -match 'VB-Audio Voicemeeter' })) {
+    # A stopped Voicemeeter must not stay the default microphone (apps would record silence).
+    $virtual = @($endpoints::ListCapture() | Where-Object { $_.Active -and $_.Name -match 'VB-Audio Voicemeeter' } | ForEach-Object Id)
+    $microphone = $endpoints::ListCapture() | Where-Object { $_.Active -and $virtual -notcontains $_.Id -and [string]$_.ParentDevice -notmatch '^\{1\}\.BTH' } | Select-Object -First 1
+    foreach ($role in 0..2) {
+        $current = $endpoints::GetDefaultCapture($role)
+        if ($current -and $virtual -contains $current -and $microphone) {
+            if (-not @($state.CaptureDefaults | Where-Object { [int]$_.Role -eq $role }).Count) {
+                $state.CaptureDefaults = @($state.CaptureDefaults) + [pscustomobject]@{ Role = $role; Id = $current }
+            }
+            $endpoints::SetDefault($microphone.Id, $role)
+        }
+    }
+    foreach ($endpoint in @(@($endpoints::ListRender()) + @($endpoints::ListCapture()) | Where-Object { $_.Active -and $_.Name -match 'VB-Audio Voicemeeter' })) {
         $endpoints::SetVisibility($endpoint.Id, $false)
         if (@($state.Hidden) -notcontains $endpoint.Id) { $state.Hidden = @($state.Hidden) + $endpoint.Id }
     }
@@ -356,6 +368,8 @@ function Invoke-Restore {
     if (@($state.Drivers).Count) { Start-Sleep -Seconds 3 }
     $active = @($endpoints::ListRender() | Where-Object Active | ForEach-Object Id)
     foreach ($endpoint in @($state.Defaults)) { if ($endpoint.Id -and $active -contains $endpoint.Id) { $endpoints::SetDefault($endpoint.Id, [int]$endpoint.Role) } }
+    $activeCapture = @($endpoints::ListCapture() | Where-Object Active | ForEach-Object Id)
+    foreach ($endpoint in @($state.CaptureDefaults)) { if ($endpoint.Id -and $activeCapture -contains $endpoint.Id) { $endpoints::SetDefault($endpoint.Id, [int]$endpoint.Role) } }
     if ($state.VoicemeeterWasRunning) {
         $directory = Get-VoicemeeterDirectory
         if ($directory) {
@@ -392,7 +406,9 @@ switch ($Action) {
         $default = $endpoints::GetDefault(0)
         Write-Output ('Default output: ' + ($endpoints::ListRender() | Where-Object Id -eq $default | Select-Object -First 1).Name)
         $state = Read-State
-        if ($state) { Write-Output ('Recorded changes: {0} driver(s), {1} renamed output(s), {2} hidden output(s)' -f @($state.Drivers).Count, @($state.Descriptions).Count, @($state.Hidden).Count) }
+        $microphone = $endpoints::GetDefaultCapture(0)
+        Write-Output ('Default microphone: ' + ($endpoints::ListCapture() | Where-Object Id -eq $microphone | Select-Object -First 1).Name)
+        if ($state) { Write-Output ('Recorded changes: {0} driver(s), {1} renamed output(s), {2} hidden endpoint(s), {3} microphone role(s)' -f @($state.Drivers).Count, @($state.Descriptions).Count, @($state.Hidden).Count, @($state.CaptureDefaults).Count) }
         if (Test-Path -LiteralPath $logPath) { Get-Content -LiteralPath $logPath -Tail 200 -Encoding UTF8 | Where-Object { $_ -match '"event":"(capture|error|default_endpoint)"' } | Select-Object -Last 3 }
     }
 }
