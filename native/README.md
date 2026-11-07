@@ -126,7 +126,10 @@ Use `--drift-ppm -200` and `--drift-ppm 200` for the two clock-offset cases.
 `--burst-ms 10` releases packets one 10 ms engine period at a time, as WASAPI
 loopback on a 480-frame endpoint does; `--burst-ms 2.6667` matches a 128-frame
 engine. At 16/8 ms both completed 30 s with zero media-period underruns (solo p95
-12.6 ms and 15.3 ms). With 10 ms bursts, 12/6, 10/5 and 8/4 ms underran.
+12.6 ms and 15.3 ms). With 10 ms bursts, 12/6, 10/5 and 8/4 ms underran. With 2.67 ms bursts
+(a 128-frame Windows engine) 12/3, 10/3 and 8/2 ms ran 20 s without underruns, and 10/3 ms
+passed the strict 120 s gate at -200 and +200 ppm: solo p95 8.75 / 8.73 ms, maximum
+8.86 / 8.96 ms, cold start 6.6 ms, zero media-period underruns.
 The sender must run in the receiver's clock domain: the WSL2 VM clock was
 measured drifting 1–3 % against the Windows host, so a Windows sender into a
 WSL receiver is not a valid timing test.
