@@ -36,21 +36,9 @@ DESKTOP_IDLE_MS=500
 
 ## Windows 设置
 
-需要最低延迟时，使用不经过 Voicemeeter 的[原生发送端](windows-sender.md)（`Setup-Windows-LowLatency.cmd`）；它与下述 Voicemeeter 方案二选一。
+双击仓库根目录的 [`Setup-Windows-Audio.cmd`](../Setup-Windows-Audio.cmd)，输入 NAS 的 IPv4 地址。脚本配置低延迟驱动和原生发送端，在 Windows 声音设置中提供“NAS 音频”输出，并登录自启。完整行为、恢复与实测见 [Windows 一键配置](windows-setup.md)。
 
-双击仓库根目录的 [`Setup-Windows-Audio.cmd`](../Setup-Windows-Audio.cmd)，输入 NAS 的 IPv4 地址。脚本自动安装并配置 [Voicemeeter Standard](https://vb-audio.com/Voicemeeter/)，将 Windows 默认播放设备切换到虚拟输入，并配置登录启动。首次安装需要管理员确认和一次 Windows 重启；脚本会在重启登录后继续配置，不自动重启电脑。
-
-脚本适用于 Windows x64、Windows PowerShell 5.1 或 PowerShell 7。安装包固定为官方 1.1.3.0，并验证归档、安装程序 SHA256 和发布者签名。状态检查、恢复及完整行为见 [Windows 配置脚本](windows-setup.md)。已有 Banana / Potato 会话不会被自动切换。
-
-也可手动设置：
-
-1. Windows 系统或目标应用的输出设备选择 `Voicemeeter Input (VB-Audio Voicemeeter VAIO)`。
-2. 在 Virtual Input 条带打开 **B**、关闭 **A**，确保条带和 BUS B 未静音。
-3. 仅网络输出时，A1 可不选物理设备，使用 Internal Clock；主采样率设为 48000 Hz。
-4. 打开 VBAN，在 Outgoing Stream 中选择 `BUS B`，填 NAS 地址、端口 `6980` 和流名 `Windows`，设置 `48000 Hz / 2 channels / PCM 16 bits`。
-5. 开启该发送行和 VBAN 总开关。其他格式、名称或源地址与接收配置不符时不会播放。
-
-Standard 的总线名称是 BUS B；Windows 的 `Voicemeeter Out B1` 是录音端点，不能替代上述播放设备。配置与内部时钟行为依据[官方手册](https://vb-audio.com/Voicemeeter/Voicemeeter_UserManual.pdf)。Voicemeeter 使用其自身的 Donationware 授权。
+也可使用任何符合上述格式的 VBAN 发送端（例如 Voicemeeter：Virtual Input → BUS B → VBAN Outgoing Stream，填 NAS 地址、端口 `6980`、流名 `Windows`、`48000 Hz / 2 channels / PCM 16 bits`）。经过 Voicemeeter 时 Windows 侧实测至少约 45 ms。同一源地址和流名同时只能有一路发送。
 
 ## 混音与空闲行为
 

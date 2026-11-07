@@ -38,6 +38,47 @@ function Select-SenderEndpoints {
         Select-Object -First $Maximum | ForEach-Object Endpoint))
 }
 
+# HDMI/DisplayPort audio functions disappear while the monitor sleeps.
+function Test-DisplayAudioDevice {
+    param([string]$ParentDevice)
+    return [bool]($ParentDevice -match 'HDAUDIO\\FUNC_01&VEN_(10DE|1002)&' -or $ParentDevice -match 'HDAUDIO\\FUNC_01&VEN_8086&DEV_28')
+}
+
+# Primary = best ranked endpoint. When it is display audio, the backup is the best
+# endpoint that stays present (a non-display device); otherwise the runner-up.
+function Select-SenderPreference {
+    param([AllowEmptyCollection()][object[]]$Endpoints, [hashtable]$ParentDevices = @{})
+    $ranked = Select-SenderEndpoints $Endpoints $ParentDevices 64
+    if (-not $ranked.Count) { return ,@() }
+    $parent = { param($id) if ($ParentDevices.ContainsKey([string]$id)) { [string]$ParentDevices[[string]$id] } else { '' } }
+    $primary = $ranked[0]
+    $rest = @($ranked | Select-Object -Skip 1)
+    $backup = if (Test-DisplayAudioDevice (& $parent $primary.id)) {
+        $rest | Where-Object { -not (Test-DisplayAudioDevice (& $parent $_.id)) } | Select-Object -First 1
+    } else { $rest | Select-Object -First 1 }
+    return ,@(@($primary, $backup) | Where-Object { $_ } | ForEach-Object id)
+}
+
+# Devices whose vendor driver can be replaced by a Microsoft class driver that
+# supports smaller shared-mode engine periods (measured: HDMI 480 -> 128 frames,
+# USB Audio 2.0 480 -> 336 frames). Input: PnP records with InstanceId, Name,
+# Status, Provider, Inf, HardwareIds, CompatibleIds.
+function Get-DriverSwitchPlan {
+    param([AllowEmptyCollection()][object[]]$Devices)
+    $plan = foreach ($device in $Devices) {
+        if ($device.Status -ne 'OK' -or [string]$device.Provider -eq 'Microsoft' -or -not @($device.HardwareIds).Count) { continue }
+        $hardware = [string]@($device.HardwareIds)[0]
+        $inbox = $null
+        if ($hardware -match '^HDAUDIO\\FUNC_01&VEN_(10DE|1002)&' -or $hardware -match '^HDAUDIO\\FUNC_01&VEN_8086&DEV_28') { $inbox = 'hdaudio.inf' }
+        elseif (@($device.CompatibleIds) -contains 'USB\Class_01&SubClass_00&Prot_20') { $inbox = 'usbaudio2.inf' }
+        if ($inbox) {
+            [pscustomobject]@{ InstanceId = [string]$device.InstanceId; Name = [string]$device.Name; HardwareId = $hardware
+                InboxInf = $inbox; OriginalInf = [string]$device.Inf; OriginalProvider = [string]$device.Provider }
+        }
+    }
+    return ,@($plan)
+}
+
 function Assert-SenderEndpointId {
     param([string]$Id)
     if (-not $Id -or $Id.Length -ge 256 -or $Id -match '[\r\n\x00]') { throw 'Invalid playback endpoint ID.' }
@@ -74,5 +115,6 @@ function New-SenderRunCommand {
     return $command
 }
 
-Export-ModuleMember -Function ConvertFrom-SenderEndpointList, Select-SenderEndpoints, Assert-SenderEndpointId,
+Export-ModuleMember -Function ConvertFrom-SenderEndpointList, Select-SenderEndpoints, Select-SenderPreference,
+    Test-DisplayAudioDevice, Get-DriverSwitchPlan, Assert-SenderEndpointId,
     New-SenderConfigLines, New-SenderRunCommand

@@ -11,147 +11,6 @@ using Microsoft.Win32.SafeHandles;
 
 namespace LanAudioBridge.WindowsAudio
 {
-    public sealed class ProcessPowerSnapshot
-    {
-        public int ProcessId { get; set; }
-        public string ExecutablePath { get; set; }
-        public long CreationTime { get; set; }
-        public uint ControlMask { get; set; }
-        public uint StateMask { get; set; }
-    }
-
-    public sealed class ProcessPowerChange
-    {
-        public ProcessPowerSnapshot Before { get; set; }
-        public ProcessPowerSnapshot After { get; set; }
-    }
-
-    // Process-local policy: must be applied again when the mixer process restarts.
-    // https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-setprocessinformation
-    public static class ProcessRuntime
-    {
-        public const uint ExecutionSpeed = 1;
-        public const uint IgnoreTimerResolution = 4;
-        private const int PowerInformationClass = 4;
-        private const uint QueryLimitedInformation = 0x1000;
-        private const uint SetInformation = 0x0200;
-
-        public static ProcessPowerSnapshot Get(int processId, string expectedExecutablePath)
-        {
-            using (ProcessHandle process = Open(processId, false))
-                return Read(process, processId, expectedExecutablePath);
-        }
-
-        public static ProcessPowerSnapshot DesiredPolicy(ProcessPowerSnapshot before, bool disableExecutionSpeed)
-        {
-            if (before == null) throw new ArgumentNullException("before");
-            uint owned = IgnoreTimerResolution | (disableExecutionSpeed ? ExecutionSpeed : 0);
-            return new ProcessPowerSnapshot {
-                ProcessId = before.ProcessId, ExecutablePath = before.ExecutablePath,
-                CreationTime = before.CreationTime,
-                ControlMask = before.ControlMask | owned, StateMask = before.StateMask & ~owned
-            };
-        }
-
-        // Caller persists Before before invoking Apply. Never silently substitute a new PID.
-        public static ProcessPowerChange Apply(ProcessPowerSnapshot before, bool disableExecutionSpeed)
-        {
-            if (before == null) throw new ArgumentNullException("before");
-            using (ProcessHandle process = Open(before.ProcessId, true)) {
-                ProcessPowerSnapshot current = Read(process, before.ProcessId, before.ExecutablePath);
-                AssertSame(current, before);
-                ProcessPowerSnapshot desired = DesiredPolicy(before, disableExecutionSpeed);
-                WriteAndVerify(process, desired, before);
-                return new ProcessPowerChange { Before = before, After = Read(process, before.ProcessId, before.ExecutablePath) };
-            }
-        }
-
-        public static ProcessPowerSnapshot Restore(ProcessPowerChange change)
-        {
-            if (change == null || change.Before == null || change.After == null)
-                throw new ArgumentException("Both before and after snapshots are required.", "change");
-            if (change.Before.ProcessId != change.After.ProcessId || change.Before.CreationTime != change.After.CreationTime ||
-                !String.Equals(change.Before.ExecutablePath, change.After.ExecutablePath, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("Runtime backup process identities do not match.");
-            using (ProcessHandle process = Open(change.Before.ProcessId, true)) {
-                ProcessPowerSnapshot current = Read(process, change.Before.ProcessId, change.Before.ExecutablePath);
-                // Refuse to overwrite changes made by another owner after our write.
-                AssertSame(current, change.After);
-                WriteAndVerify(process, change.Before, change.After);
-                return Read(process, change.Before.ProcessId, change.Before.ExecutablePath);
-            }
-        }
-
-        private static void AssertSame(ProcessPowerSnapshot actual, ProcessPowerSnapshot expected)
-        {
-            if (actual.CreationTime != expected.CreationTime)
-                throw new InvalidOperationException("The mixer process restarted; the runtime backup belongs to another process instance.");
-            if (actual.ControlMask != expected.ControlMask || actual.StateMask != expected.StateMask)
-                throw new InvalidOperationException("Process power policy changed since the snapshot; no policy was overwritten.");
-        }
-
-        private static ProcessHandle Open(int processId, bool writable)
-        {
-            if (processId <= 0) throw new ArgumentOutOfRangeException("processId");
-            ProcessHandle process = OpenProcess(QueryLimitedInformation | (writable ? SetInformation : 0), false, processId);
-            if (process.IsInvalid) { int error = Marshal.GetLastWin32Error(); process.Dispose(); throw new Win32Exception(error, "Cannot open mixer process."); }
-            return process;
-        }
-
-        private static ProcessPowerSnapshot Read(ProcessHandle process, int processId, string expectedPath)
-        {
-            if (String.IsNullOrWhiteSpace(expectedPath) || !Path.IsPathRooted(expectedPath))
-                throw new ArgumentException("A complete expected executable path is required.", "expectedPath");
-            StringBuilder path = new StringBuilder(32768);
-            uint length = (uint)path.Capacity;
-            if (!QueryFullProcessImageName(process, 0, path, ref length)) throw Error("Cannot read mixer executable path.");
-            if (!String.Equals(Path.GetFullPath(expectedPath), Path.GetFullPath(path.ToString()), StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("Process executable does not match the configured mixer path.");
-            long creation, exit, kernel, user;
-            if (!GetProcessTimes(process, out creation, out exit, out kernel, out user)) throw Error("Cannot read mixer process identity.");
-            PowerState state = new PowerState { Version = 1 };
-            if (!GetProcessInformation(process, PowerInformationClass, ref state, (uint)Marshal.SizeOf(typeof(PowerState))))
-                throw Error("Cannot read process power policy (requires a supported Windows version).");
-            return new ProcessPowerSnapshot { ProcessId = processId, ExecutablePath = path.ToString(), CreationTime = creation,
-                ControlMask = state.ControlMask, StateMask = state.StateMask };
-        }
-
-        private static void WriteAndVerify(ProcessHandle process, ProcessPowerSnapshot desired, ProcessPowerSnapshot rollback)
-        {
-            Write(process, desired);
-            try { AssertSame(Read(process, desired.ProcessId, desired.ExecutablePath), desired); }
-            catch (Exception failure) {
-                try { Write(process, rollback); AssertSame(Read(process, rollback.ProcessId, rollback.ExecutablePath), rollback); }
-                catch (Exception restoreFailure) { throw new AggregateException("Power policy verification and rollback failed; retain the backup.", failure, restoreFailure); }
-                throw new InvalidOperationException("Power policy verification failed; the previous policy was restored.", failure);
-            }
-        }
-
-        private static void Write(ProcessHandle process, ProcessPowerSnapshot snapshot)
-        {
-            PowerState state = new PowerState { Version = 1, ControlMask = snapshot.ControlMask, StateMask = snapshot.StateMask };
-            if (!SetProcessInformation(process, PowerInformationClass, ref state, (uint)Marshal.SizeOf(typeof(PowerState))))
-                throw Error("Cannot set process power policy; no success has been recorded.");
-        }
-
-        private static Win32Exception Error(string message) { return new Win32Exception(Marshal.GetLastWin32Error(), message); }
-        [StructLayout(LayoutKind.Sequential)] private struct PowerState { public uint Version; public uint ControlMask; public uint StateMask; }
-        private sealed class ProcessHandle : SafeHandleZeroOrMinusOneIsInvalid {
-            private ProcessHandle() : base(true) { }
-            protected override bool ReleaseHandle() { return CloseHandle(handle); }
-        }
-        [DllImport("kernel32.dll", SetLastError = true)] private static extern ProcessHandle OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, int processId);
-        [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool CloseHandle(IntPtr handle);
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "QueryFullProcessImageNameW")]
-        [return: MarshalAs(UnmanagedType.Bool)] private static extern bool QueryFullProcessImageName(ProcessHandle process, uint flags, StringBuilder path, ref uint size);
-        [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetProcessTimes(ProcessHandle process, out long creation, out long exit, out long kernel, out long user);
-        [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetProcessInformation(ProcessHandle process, int informationClass, ref PowerState information, uint size);
-        [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool SetProcessInformation(ProcessHandle process, int informationClass, ref PowerState information, uint size);
-    }
-
     public sealed class EndpointInfo
     {
         public string Id { get; internal set; }
@@ -217,6 +76,43 @@ namespace LanAudioBridge.WindowsAudio
             }
             finally { Release(devices); Release(enumerator); }
         }
+
+        // Device description (the first part of the Sound settings name, e.g. "Speakers").
+        // Writing requires administrator rights; Windows keeps it per endpoint.
+        public static string GetDescription(string id)
+        {
+            ValidateEndpointId(id);
+            IMMDeviceEnumerator enumerator = null; IMMDevice device = null; IPropertyStore properties = null;
+            try
+            {
+                enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+                Check(enumerator.GetDevice(id, out device), "Open endpoint");
+                Check(device.OpenPropertyStore(0, out properties), "Open endpoint properties");
+                return ReadOptionalString(properties, DeviceDescription);
+            }
+            finally { Release(properties); Release(device); Release(enumerator); }
+        }
+
+        public static void SetDescription(string id, string text)
+        {
+            ValidateEndpointId(id);
+            if (String.IsNullOrWhiteSpace(text) || text.Length > 64 || text.IndexOf('\0') >= 0)
+                throw new ArgumentException("A short, nonempty description is required.", "text");
+            IMMDeviceEnumerator enumerator = null; IMMDevice device = null; IPropertyStore properties = null;
+            PropVariant value = new PropVariant { VariantType = 31, Pointer = Marshal.StringToCoTaskMemUni(text) };
+            try
+            {
+                enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+                Check(enumerator.GetDevice(id, out device), "Open endpoint");
+                Check(device.OpenPropertyStore(2, out properties), "Open endpoint properties for writing");
+                PropertyKey key = DeviceDescription;
+                Check(properties.SetValue(ref key, ref value), "Set endpoint description");
+                Check(properties.Commit(), "Save endpoint description");
+            }
+            finally { PropVariantClear(ref value); Release(properties); Release(device); Release(enumerator); }
+        }
+
+        private static readonly PropertyKey DeviceDescription = new PropertyKey(new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), 2);
 
         public static string GetDefault(int role)
         {

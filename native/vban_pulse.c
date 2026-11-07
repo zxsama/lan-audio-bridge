@@ -33,7 +33,7 @@
 enum phase { IDLE, PRIMING, PLAYING, DRAINING, CORKING, FLUSHING };
 static const char *phase_names[] = {"idle", "priming", "playing", "draining", "corking", "flushing"};
 struct packet { bool used, concealed; uint32_t sequence; size_t size, offset; uint8_t pcm[MAX_PCM]; };
-struct stats { uint64_t accepted, invalid, wrong_source, duplicate, late, missing, overflow,
+struct stats { uint64_t accepted, invalid, wrong_source, duplicate, late, missing, overflow, server_overflow,
     discontinuities, underflow, sessions, written_bytes; };
 struct reply { bool used; struct sockaddr_un address; socklen_t len; };
 struct app {
@@ -56,6 +56,7 @@ struct app {
     uint64_t control_time; pa_usec_t configured_sink_usec; bool target_negotiated;
     const char *scheduling;
     unsigned suspend_delay_ms; uint64_t suspend_at; /* deferred idle suspend; 0 = none pending */
+    uint64_t diag_window; unsigned diag_count, diag_suppressed;
 };
 static volatile sig_atomic_t stopped;
 static uint64_t mono_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000 + t.tv_nsec / 1000; }
@@ -90,15 +91,35 @@ static void status_json(struct app *a, char *out, size_t size, const char *event
     if (count <= 0 || (size_t)count >= size) goto truncated;
     size_t used = (size_t)count;
     count = snprintf(out + used - 1, size - used + 1,
-        ",\"rate_ack\":%u,\"rate_pending\":%s,\"server_rate\":%u,\"resampler\":\"%s\",\"read_index\":%" PRId64 ",\"write_index\":%" PRId64 ",\"sink_usec\":%" PRIu64 ",\"transport_usec\":%" PRIu64 ",\"monotonic_us\":%" PRIu64 ",\"effective_target_us\":%.1f,\"configured_sink_us\":%" PRIu64 ",\"target_negotiated\":%s,\"scheduling\":\"%s\",\"suspend_pending_ms\":%.0f}",
+        ",\"rate_ack\":%u,\"rate_pending\":%s,\"server_rate\":%u,\"resampler\":\"%s\",\"read_index\":%" PRId64 ",\"write_index\":%" PRId64 ",\"sink_usec\":%" PRIu64 ",\"transport_usec\":%" PRIu64 ",\"monotonic_us\":%" PRIu64 ",\"effective_target_us\":%.1f,\"configured_sink_us\":%" PRIu64 ",\"target_negotiated\":%s,\"scheduling\":\"%s\",\"suspend_pending_ms\":%.0f,\"server_overflow\":%" PRIu64 "}",
         a->rate_acks, a->rate_pending ? "true" : "false", a->server_rate, a->resampler,
         a->read_index, a->write_index, (uint64_t)a->sink_usec, (uint64_t)a->transport_usec, mono_us(),
         a->target_backlog, (uint64_t)a->configured_sink_usec, a->target_negotiated ? "true" : "false", a->scheduling,
-        a->suspend_at > mono_us() ? (a->suspend_at - mono_us()) / 1000.0 : 0.0);
+        a->suspend_at > mono_us() ? (a->suspend_at - mono_us()) / 1000.0 : 0.0, a->stats.server_overflow);
     if (count >= 0 && (size_t)count < size - used + 1) return;
 truncated:
     fprintf(stderr, "status JSON exceeded its buffer\n");
     snprintf(out, size, "{\"ok\":false,\"error\":\"status_truncated\"}");
+}
+/* Rate-limited one-line diagnostics on stderr (the container log). Counters and
+ * queue state only: never PCM, addresses or stream content. */
+static void diag(struct app *a, const char *event) {
+    uint64_t now = mono_us();
+    if (now - a->diag_window >= 1000000) {
+        if (a->diag_suppressed) fprintf(stderr, "vban-pulse: %u diagnostics suppressed\n", a->diag_suppressed);
+        a->diag_window = now; a->diag_count = 0; a->diag_suppressed = 0;
+    }
+    if (a->diag_count++ >= 5) { a->diag_suppressed++; return; }
+    const pa_timing_info *timing = a->ready ? pa_stream_get_timing_info(a->stream) : NULL;
+    const pa_buffer_attr *attr = a->ready ? pa_stream_get_buffer_attr(a->stream) : NULL;
+    double server_ms = timing && !timing->read_index_corrupt && !timing->write_index_corrupt
+        ? (timing->write_index - timing->read_index) * 1000.0 / BYTE_RATE : -1;
+    fprintf(stderr, "vban-pulse: %s phase=%s queued_ms=%.1f server_queue_ms=%.1f latency_ms=%.1f ppm=%.0f "
+        "tlength=%u maxlength=%u underflow=%" PRIu64 " server_overflow=%" PRIu64 " ring_overflow=%" PRIu64
+        " discontinuities=%" PRIu64 " sessions=%" PRIu64 "\n", event, phase_names[a->phase], a->queued * 1000.0 / BYTE_RATE,
+        server_ms, a->latency / 1000.0, a->ppm, attr ? attr->tlength : 0, attr ? attr->maxlength : 0,
+        a->stats.underflow, a->stats.server_overflow, a->stats.overflow, a->stats.discontinuities, a->stats.sessions);
+    fflush(stderr);
 }
 static void notify(struct app *a, const char *event) {
     char out[STATUS_BYTES]; status_json(a, out, sizeof(out), event); puts(out); fflush(stdout);
@@ -208,7 +229,7 @@ static void flushed(pa_stream *stream, int success, void *userdata) {
     if (a->ending) { a->active = false; a->ending = false; a->revision++; reconcile(a); notify(a, "inactive"); }
     /* UDP arriving during cork/flush is held in the fixed packet ring. */
     if (a->active) { a->phase = PRIMING; pump(a, mono_us()); }
-    else notify(a, "idle");
+    else { notify(a, "idle"); diag(a, "idle"); }
 }
 static void corked(pa_stream *stream, int success, void *userdata) {
     struct app *a = userdata;
@@ -241,7 +262,7 @@ static void start_session(struct app *a, uint32_t sequence, uint64_t now) {
     set_rate(a, RATE);
     a->integral = 0; a->last_adjust = now; a->control_time = now;
     if (a->phase != CORKING && a->phase != FLUSHING) a->phase = PRIMING;
-    a->stats.sessions++; a->revision++; reconcile(a); notify(a, "active");
+    a->stats.sessions++; a->revision++; reconcile(a); notify(a, "active"); diag(a, "session");
 }
 static bool have_future(struct app *a) {
     return (int32_t)(a->highest_sequence - a->next_sequence) > 0;
@@ -282,7 +303,7 @@ static void pump(struct app *a, uint64_t now) {
             }
             if (missing_run == SLOTS) break;
             if (missing_run * a->previous_size > BYTE_RATE * 20U / 1000U) {
-                a->stats.discontinuities++;
+                a->stats.discontinuities++; diag(a, "discontinuity");
                 /* Already-arrived successors are not missing packets. Preserve
                  * them and skip only the long absent sequence run. */
                 a->next_sequence += missing_run;
@@ -334,9 +355,9 @@ static void receive_packet(struct app *a, const uint8_t *data, size_t size, cons
     a->stats.accepted++;
     if ((!a->active || a->ending) && !nonzero) { a->next_sequence = sequence + 1; a->sequence_valid = true; return; }
     if (!a->active || a->ending) start_session(a, sequence, now);
-    else if (!a->sequence_valid) { clear_packets(a); a->next_sequence = sequence; a->highest_sequence = sequence; a->sequence_valid = true; a->stats.discontinuities++; }
+    else if (!a->sequence_valid) { clear_packets(a); a->next_sequence = sequence; a->highest_sequence = sequence; a->sequence_valid = true; a->stats.discontinuities++; diag(a, "discontinuity"); }
     if ((uint32_t)(sequence - a->next_sequence) >= SLOTS || a->queued + size - 28 > BYTE_RATE * 40U / 1000U) {
-        clear_packets(a); a->next_sequence = sequence; a->stats.overflow++;
+        clear_packets(a); a->next_sequence = sequence; a->stats.overflow++; diag(a, "ring_overflow");
         /* Do not flush in-flight PCM: cap the application queue and recover on fresh input. */
     }
     struct packet *p = &a->packets[sequence % SLOTS];
@@ -386,7 +407,10 @@ static void control_read(pa_mainloop_api *api, pa_io_event *event, int fd, pa_io
     sendto(fd, out, strlen(out), MSG_DONTWAIT, (struct sockaddr *)&address, len);
 }
 static void write_ready(pa_stream *stream, size_t count, void *userdata) { (void)stream; (void)count; pump(userdata, mono_us()); }
-static void underflow(pa_stream *stream, void *userdata) { (void)stream; struct app *a = userdata; if (a->active) { a->stats.underflow++; a->underrun_pending = true; notify(a, "underflow"); } }
+static void underflow(pa_stream *stream, void *userdata) { (void)stream; struct app *a = userdata; if (a->active) { a->stats.underflow++; a->underrun_pending = true; notify(a, "underflow"); diag(a, "underflow"); } }
+/* The server dropped written PCM because its queue was full (PulseAudio logs
+ * "Failed to push data into queue"). */
+static void overflow(pa_stream *stream, void *userdata) { (void)stream; struct app *a = userdata; a->stats.server_overflow++; notify(a, "server_overflow"); diag(a, "server_overflow"); }
 static void attr_changed(pa_stream *stream, void *userdata) {
     (void)stream;
     struct app *a = userdata;
@@ -415,6 +439,7 @@ static void context_state(pa_context *context, void *userdata) {
         pa_stream_set_state_callback(a->stream, stream_state, a);
         pa_stream_set_write_callback(a->stream, write_ready, a);
         pa_stream_set_underflow_callback(a->stream, underflow, a);
+        pa_stream_set_overflow_callback(a->stream, overflow, a);
         pa_stream_set_buffer_attr_callback(a->stream, attr_changed, a);
         pa_buffer_attr attr = {BYTE_RATE * 40 / 1000, BYTE_RATE * a->latency_ms / 1000, 0, BYTE_RATE * 2 / 1000, (uint32_t)-1};
         pa_cvolume volume; pa_cvolume_set(&volume, 2, pa_sw_volume_from_linear(a->gain));

@@ -30,7 +30,7 @@ Shairport Sync 的 `LICENSES` 包含主许可证和组件索引，并非所有�
 
 Python 与原生 C 的 VBAN 接收器均为依据[公开 PCM 协议规范](https://vb-audio.com/Voicemeeter/VBANProtocol_Specifications.pdf)编写的项目自有代码，采用 MIT 许可证。原生程序动态链接 Debian 提供的 `libpulse`，该库保留其软件包许可证及版权声明。镜像不包含 Voicemeeter 客户端、驱动或 Linux `vban` 项目的源码。
 
-Windows 配置脚本从 [VB-Audio 官方来源](https://voicemeeter.com/)下载 Voicemeeter Standard 1.1.3.0，校验固定 SHA256 和发布者签名后调用官方安装程序及 Remote API。仓库不分发其二进制文件。Voicemeeter 采用 Donationware 授权，欢迎捐赠或购买许可证支持 VB-Audio；专业使用及分发须遵守其[授权说明](https://vb-audio.com/Services/licensing.htm)。该软件与驱动不适用本项目的 MIT 许可证。
+早期版本的 Windows 配置脚本曾从 VB-Audio 官方来源下载 Voicemeeter Standard；当前脚本不再下载或安装 Voicemeeter，只在其已安装时关闭其 VBAN 输出并隐藏其端点。Voicemeeter 使用其自身的授权。
 
 ## 测试依赖
 

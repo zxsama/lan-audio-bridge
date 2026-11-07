@@ -681,13 +681,15 @@ class Supervisor:
             context = child.context
             credentials = ({"user": context.user, "group": context.group,
                             "extra_groups": context.extra_groups} if context else {})
+            # The native desktop receiver's stderr holds only its own counters and queue state.
+            diagnostics = child.core or (child.name == "desktop" and child.argv[0] == "vban-pulse")
             child.process = self.popen(child.argv,
                                        env=context.env if context else child_environment(None if child.core else child.name),
                                        stdin=subprocess.DEVNULL,
                                        # Receiver diagnostics can contain account ids, signed URLs
                                        # or metadata. Only safe lifecycle events are logged here.
                                        stdout=None if child.core else subprocess.DEVNULL,
-                                       stderr=None if child.core else subprocess.DEVNULL,
+                                       stderr=None if diagnostics else subprocess.DEVNULL,
                                        start_new_session=True, **credentials)
             child.state = "running"
             child.started_at = now

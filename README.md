@@ -51,7 +51,7 @@ docker compose -f compose.yaml -f compose.host-avahi.yaml up -d
 - [配置与运行约定](docs/runtime.md)
 - [MiPlay 与播放缓冲](docs/miplay.md)
 - [Windows 网络音频与混音](docs/desktop-audio.md)
-- [Windows 原生低延迟发送端](docs/windows-sender.md)
+- [Windows 一键配置](docs/windows-setup.md)
 - [运维与验收](docs/operations.md)
 - [开发与测试](docs/development.md)
 - [上游组件与构建来源](docs/UPSTREAM.md)

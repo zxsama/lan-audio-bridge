@@ -132,33 +132,19 @@ docker compose -f compose.native-test.yaml down --volumes
 
 ```sh
 docker compose -f compose.e2e-test.yaml up -d --wait
-docker compose -f compose.e2e-test.yaml exec -T audio python3 /workspace/tests/native_vban.py   --binary /usr/local/bin/vban-pulse --output /tmp/burst --seconds 30 --latency-ms 16 --jitter-ms 8 --burst-ms 10
+docker compose -f compose.e2e-test.yaml exec -T audio python3 /workspace/tests/native_vban.py --binary /usr/local/bin/vban-pulse --output /tmp/burst --seconds 30 --latency-ms 16 --jitter-ms 8 --burst-ms 10
 docker compose -f compose.e2e-test.yaml exec -T audio python3 /workspace/tests/native_watch.py --seconds 30
 docker compose -f compose.e2e-test.yaml down --volumes
 ```
 
 `--burst-ms` 模拟 WASAPI loopback 按引擎周期整块交付。`native_watch.py` 每 50 ms 读取接收器 STATUS，输出队列、延迟、调速和欠载时间序列。`e2e_echo.py` 在容器内检测 `output.monitor` 上的标记起点并经 UDP 回传，供发送端用自己的时钟计时；WSL2 时钟相对 Windows 漂移，Windows 发送到 WSL 接收的结果不代表真实设备，只能用于功能检查。
 
-## Windows 原生发送端
+## Windows 配置与发送端
 
 ```powershell
-native\windowsuild.cmd
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows-sender.Tests.ps1
-```
-
-`build.cmd` 用 MSVC x64（`/W4 /WX`）生成 `dist\windowsban-sender.exe`。测试只覆盖端点筛选、配置生成和启动项命令，不改变音频设备或启动项；2026-11-07 在 Windows PowerShell 5.1 中通过 20 项。安装与设备行为见 [Windows 原生发送端](windows-sender.md)。
-
-## Windows 配置脚本
-
-```powershell
+native\windows\build.cmd
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows-audio.Tests.ps1
 pwsh -NoProfile -File tests/windows-audio.Tests.ps1
 ```
 
-测试使用模拟 Remote API 检查参数、槽位、读回失败及恢复相关逻辑，不安装驱动、不切换真实设备、不写登录启动项。安装包 SHA256 与签名可单独验证，不能代替真实安装、重启续配和 Windows 到接收端的播放验收。`Plan` 与 `Status` 可用于不改变音频路由的本机检查。
-
-2026-11-06 在 Windows PowerShell 5.1 和 PowerShell 7 中各通过 38 项测试，包括隔离执行生产脚本的安装、重启门禁及配置事务。官方 1.1.3.0 安装包的 SHA256、发布者签名和归档结构已验证；C# 互操作编译、真实端点枚举和默认设备接口查询通过，检查前后默认播放设备与启动项一致。未执行真实驱动安装、重启续配或改变默认设备，尚未完成 Voicemeeter 到实际接收设备的播放和延迟验收。
-
-随后针对实际安装返回 `1` 的修复，两版 PowerShell 各通过 **61 项测试**，覆盖安装证据、失败状态续配、待重启端点未就绪、额外端点禁用及恢复、异步 XML 读回和独立回滚。本机确认 Standard 1.1.3.0 与微软签名的 VAIO 3.4.1.9 已安装；7 个辅助播放端点禁用，主输入启用，其他播放设备状态不变。
-
-真实发送测试按设备名向主输入发送 2 秒低幅 997 Hz 音频，本机 UDP 收到 2327 个连续音频包，格式为 48 kHz／双声道／16 位 PCM，检出对应频率与非零采样。生产恢复函数在 220 ms 内读回原 18 项参数，测试前后默认设备和端点状态一致。测试进程已关闭。该结果仅覆盖 Windows 本机发送与恢复；仍需 Windows 重启后的自动续配，以及 NAS／实际音响的播放验收，不能作为端到端延迟结果。
+`build.cmd` 用 MSVC x64（`/W4 /WX`）生成 `dist\windows\vban-sender.exe`。测试覆盖端点筛选、主/备用输出选择、驱动更换计划、配置生成和启动项命令，并检查配置脚本可解析且保持 ASCII；不改变音频设备、驱动或启动项。2026-11-07 在 Windows PowerShell 5.1 中通过 33 项。实际行为和测量见 [Windows 一键配置](windows-setup.md)。
