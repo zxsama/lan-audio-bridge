@@ -22,6 +22,8 @@ import time
 RATE = 48000
 FRAMES = 128
 HEADER = struct.Struct("<4sBBBB16sI")
+# >0 releases packets in chunks, like WASAPI loopback delivering one engine period at a time.
+BURST_S = 0.0
 
 
 def wait_for(predicate, timeout=5):
@@ -105,6 +107,9 @@ def send(seconds, faults=False, marker_times=(), level=4000, drift_ppm=0, teleme
         start = time.monotonic()
         for sequence in range(packets):
             deadline = start + sequence * FRAMES / RATE / (1 + drift_ppm / 1e6)
+            if BURST_S:
+                # A packet leaves once the whole engine period containing its last frame is complete.
+                deadline = start + math.ceil((sequence + 1) * FRAMES / RATE / BURST_S - 1e-9) * BURST_S / (1 + drift_ppm / 1e6)
             delay = deadline - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
@@ -197,7 +202,11 @@ def main():
                         help="Test-only fixed null-sink scheduling latency, injected into this private Pulse process")
     parser.add_argument("--max-observed-latency-ms", type=float, default=20,
                         help="Explicit monitor observation gate; hardware-floor fixtures may need a larger bound")
+    parser.add_argument("--burst-ms", type=float, default=0,
+                        help="Send in chunks of this period (10 = shared-mode WASAPI loopback)")
     args = parser.parse_args()
+    global BURST_S
+    BURST_S = args.burst_ms / 1000
     args.output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="native-vban-") as temporary:
         directory = Path(temporary)
@@ -357,7 +366,7 @@ void pa_sink_set_latency_range(void *sink, uint64_t minimum, uint64_t maximum) {
             result = {"ok": True, "measurement": "same-container UDP send to output.monitor read; includes monitor buffering",
                 "excludes": "Windows capture, physical LAN, ALSA DAC and speaker", "solo_seconds": args.seconds,
                 "configured_latency_ms": args.latency_ms, "configured_jitter_ms": args.jitter_ms,
-                "sender_drift_ppm": args.drift_ppm,
+                "sender_drift_ppm": args.drift_ppm, "burst_ms": args.burst_ms,
                 "sender_timing": sender_timing,
                 "monitor_clock": solo_clock, "record_ms": args.record_ms,
                 "resample_method": args.resample_method,

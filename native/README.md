@@ -22,6 +22,11 @@ Example against an existing, explicitly selected server and output:
   --gain 1 --control /run/lan-audio/desktop-control.sock --managed
 ```
 
+`--realtime` (passed by the runtime when `PULSE_REALTIME=true`) requests
+`SCHED_FIFO` priority 4 with `SCHED_RESET_ON_FORK`, falling back to nice −11
+and then normal priority; status `scheduling` reports `fifo`, `nice`, `normal`
+or `default`. It relies only on the container's `rtprio`/`nice` limits.
+
 The `--source-ip` argument is mandatory. The stream name must occupy 1–16 bytes.
 Only the configured IPv4 source, stream name, PCM format and exact packet length
 are accepted. Datagram payloads are limited by VBAN to 256 audio frames. The
@@ -113,6 +118,13 @@ python3 tests/native_vban.py --binary /tmp/vban-pulse \
 ```
 
 Use `--drift-ppm -200` and `--drift-ppm 200` for the two clock-offset cases.
+`--burst-ms 10` releases packets one 10 ms engine period at a time, as WASAPI
+loopback on a 480-frame endpoint does; `--burst-ms 2.6667` matches a 128-frame
+engine. At 16/8 ms both completed 30 s with zero media-period underruns (solo p95
+12.6 ms and 15.3 ms). With 10 ms bursts, 12/6, 10/5 and 8/4 ms underran.
+The sender must run in the receiver's clock domain: the WSL2 VM clock was
+measured drifting 1–3 % against the Windows host, so a Windows sender into a
+WSL receiver is not a valid timing test.
 The fixture defaults to `speex-float-5` and retains the 2 ms recording request.
 `monitor_clock` reports recorded frames against monotonic time; `steady_passed`
 separates actual media-period underflows from the expected underrun after stop.

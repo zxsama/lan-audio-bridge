@@ -21,7 +21,7 @@
 ```sh
 git clone https://github.com/zxsama/lan-audio-bridge.git
 cd lan-audio-bridge
-docker build -t lan-audio-bridge:0.4.0 .
+docker build -t lan-audio-bridge:0.5.0 .
 cp .env.example .env
 ```
 
@@ -51,6 +51,7 @@ docker compose -f compose.yaml -f compose.host-avahi.yaml up -d
 - [配置与运行约定](docs/runtime.md)
 - [MiPlay 与播放缓冲](docs/miplay.md)
 - [Windows 网络音频与混音](docs/desktop-audio.md)
+- [Windows 原生低延迟发送端](docs/windows-sender.md)
 - [运维与验收](docs/operations.md)
 - [开发与测试](docs/development.md)
 - [上游组件与构建来源](docs/UPSTREAM.md)

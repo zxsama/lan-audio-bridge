@@ -2,12 +2,14 @@
  * Experimental 48 kHz stereo s16le VBAN -> asynchronous libpulse receiver.
  * One Pulse mainloop handles UDP, control and timeouts. No helper PCM process.
  */
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE /* SCHED_RESET_ON_FORK */
 #include <pulse/pulseaudio.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
+#include <sched.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -52,6 +54,7 @@ struct app {
     unsigned desired_rate, inflight_rate, server_rate, rate_acks; bool rate_pending;
     char resampler[64]; int64_t read_index, write_index; pa_usec_t sink_usec, transport_usec;
     uint64_t control_time; pa_usec_t configured_sink_usec; bool target_negotiated;
+    const char *scheduling;
 };
 static volatile sig_atomic_t stopped;
 static uint64_t mono_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000 + t.tv_nsec / 1000; }
@@ -86,10 +89,10 @@ static void status_json(struct app *a, char *out, size_t size, const char *event
     if (count <= 0 || (size_t)count >= size) goto truncated;
     size_t used = (size_t)count;
     count = snprintf(out + used - 1, size - used + 1,
-        ",\"rate_ack\":%u,\"rate_pending\":%s,\"server_rate\":%u,\"resampler\":\"%s\",\"read_index\":%" PRId64 ",\"write_index\":%" PRId64 ",\"sink_usec\":%" PRIu64 ",\"transport_usec\":%" PRIu64 ",\"monotonic_us\":%" PRIu64 ",\"effective_target_us\":%.1f,\"configured_sink_us\":%" PRIu64 ",\"target_negotiated\":%s}",
+        ",\"rate_ack\":%u,\"rate_pending\":%s,\"server_rate\":%u,\"resampler\":\"%s\",\"read_index\":%" PRId64 ",\"write_index\":%" PRId64 ",\"sink_usec\":%" PRIu64 ",\"transport_usec\":%" PRIu64 ",\"monotonic_us\":%" PRIu64 ",\"effective_target_us\":%.1f,\"configured_sink_us\":%" PRIu64 ",\"target_negotiated\":%s,\"scheduling\":\"%s\"}",
         a->rate_acks, a->rate_pending ? "true" : "false", a->server_rate, a->resampler,
         a->read_index, a->write_index, (uint64_t)a->sink_usec, (uint64_t)a->transport_usec, mono_us(),
-        a->target_backlog, (uint64_t)a->configured_sink_usec, a->target_negotiated ? "true" : "false");
+        a->target_backlog, (uint64_t)a->configured_sink_usec, a->target_negotiated ? "true" : "false", a->scheduling);
     if (count >= 0 && (size_t)count < size - used + 1) return;
 truncated:
     fprintf(stderr, "status JSON exceeded its buffer\n");
@@ -471,10 +474,18 @@ static unsigned number(const char *value, unsigned low, unsigned high) {
 }
 int main(int argc, char **argv) {
     struct app app = {.udp_fd = -1, .control_fd = -1, .sink = "output", .port = 6980,
-        .latency_ms = 16, .jitter_ms = 8, .idle_ms = 500, .gain = 1, .phone = -1, .held_phone = -1, .playback_rate = RATE, .previous_size = 512};
+        .latency_ms = 16, .jitter_ms = 8, .idle_ms = 500, .gain = 1, .phone = -1, .held_phone = -1, .playback_rate = RATE, .previous_size = 512, .scheduling = "default"};
     struct app *a = &app; const char *source = NULL; strcpy(a->name, "Windows");
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--managed")) { a->managed = true; continue; }
+        if (!strcmp(argv[i], "--realtime")) {
+            /* Best effort within RLIMIT_RTPRIO / RLIMIT_NICE; no capability is required or kept. */
+            struct sched_param param = {.sched_priority = 4};
+            if (sched_setscheduler(0, SCHED_FIFO | SCHED_RESET_ON_FORK, &param) == 0) a->scheduling = "fifo";
+            else if (setpriority(PRIO_PROCESS, 0, -11) == 0) a->scheduling = "nice";
+            else a->scheduling = "normal";
+            continue;
+        }
         if (i + 1 >= argc) { fprintf(stderr, "Expected option value\n"); return 2; }
         const char *option = argv[i++], *value = argv[i];
         if (!strcmp(option, "--source-ip")) source = value;

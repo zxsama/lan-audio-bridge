@@ -17,12 +17,12 @@
 
 ## 构建与 CLI 部署
 
-以下命令在 Linux 项目目录执行。构建镜像需要下载上游依赖，生成本地镜像 `lan-audio-bridge:0.4.0`。项目未发布公共容器镜像。
+以下命令在 Linux 项目目录执行。构建镜像需要下载上游依赖，生成本地镜像 `lan-audio-bridge:0.5.0`。项目未发布公共容器镜像。
 
 ```sh
 git clone https://github.com/zxsama/lan-audio-bridge.git
 cd lan-audio-bridge
-docker build --tag lan-audio-bridge:0.4.0 .
+docker build --tag lan-audio-bridge:0.5.0 .
 cp .env.example .env
 ```
 
@@ -48,13 +48,13 @@ docker compose logs --tail=100 audio
 
 上述命令使用默认 `AVAHI_MODE=internal`，由音频容器启动自己的 D-Bus 和 Avahi。宿主已运行 Avahi 时，按[外部发现模式](host-avahi.md)改用 `docker compose -f compose.yaml -f compose.host-avahi.yaml ...`；仅设置环境变量不足以建立代理挂载。
 
-基础生产配置只有一个服务，使用 host network、`/dev/snd` 映射和指定 `/data`；外部发现模式另加隔离的 `discovery-proxy` 服务。不需要 privileged、Docker socket 或宿主根目录挂载。音频容器以 root 初始化内部服务，删除默认能力后仅保留文件权限、切换服务用户、低端口绑定及终止已降权子进程所需能力；未申请宿主实时调度或网络管理权限。固定大小的 `/run`、`/tmp` 临时文件系统与日志轮转限制临时数据增长，`/data` 使用量仍需由 NAS 监控。
+基础生产配置只有一个服务，使用 host network、`/dev/snd` 映射和指定 `/data`；外部发现模式另加隔离的 `discovery-proxy` 服务。不需要 privileged、Docker socket 或宿主根目录挂载。音频容器以 root 初始化内部服务，删除默认能力后仅保留文件权限、切换服务用户、低端口绑定及终止已降权子进程所需能力；未申请实时调度能力或网络管理权限；`rtprio`/`nice` 资源上限只在 `PULSE_REALTIME=true` 时使用，内核拒绝时退回普通优先级。固定大小的 `/run`、`/tmp` 临时文件系统与日志轮转限制临时数据增长，`/data` 使用量仍需由 NAS 监控。
 
 ## TrueNAS 自定义 YAML 部署
 
 仓库发布源码与部署文件，不包含预构建镜像或本地 `dist/` 归档。请先按上节构建镜像，再部署或导出。
 
-先确保 NAS 本地 Docker 中已有镜像。如果在另一台 Linux amd64 机器构建，可执行 `docker save -o lan-audio-bridge-0.4.0.tar lan-audio-bridge:0.4.0`，自行传输到 NAS，再执行 `docker load -i lan-audio-bridge-0.4.0.tar`。项目脚本不会自动远程操作 NAS。
+先确保 NAS 本地 Docker 中已有镜像。如果在另一台 Linux amd64 机器构建，可执行 `docker save -o lan-audio-bridge-0.5.0.tar lan-audio-bridge:0.5.0`，自行传输到 NAS，再执行 `docker load -i lan-audio-bridge-0.5.0.tar`。项目脚本不会自动远程操作 NAS。
 
 填写 `.env` 后在 NAS 项目目录运行：
 

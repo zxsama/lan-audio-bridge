@@ -68,6 +68,13 @@ class Config:
     desktop_backend: str = "python"
     desktop_native_latency_ms: int = 16
     desktop_native_jitter_ms: int = 8
+    # ALSA output scheduling. "timer" keeps PulseAudio's default timer-based
+    # scheduling (large hardware buffer, adaptive watermark). "interrupt" uses
+    # fixed small ALSA periods (tsched=0) so the hardware queue stays bounded.
+    output_scheduling: str = "timer"
+    output_fragment_ms: int = 2
+    output_fragments: int = 3
+    pulse_realtime: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Config:
@@ -129,6 +136,12 @@ class Config:
         backend = env.get("DESKTOP_BACKEND", "python")
         if backend not in ("python", "native"):
             raise BridgeError("DESKTOP_BACKEND must be python or native")
+        scheduling = env.get("OUTPUT_SCHEDULING", "timer")
+        if scheduling not in ("timer", "interrupt"):
+            raise BridgeError("OUTPUT_SCHEDULING must be timer or interrupt")
+        realtime = env.get("PULSE_REALTIME", "false").lower()
+        if realtime not in ("true", "false"):
+            raise BridgeError("PULSE_REALTIME must be true or false")
         return cls(name, mode, device, rate, number("OUTPUT_VOLUME", 100, 0, 100),
                    tuple(enabled), interface, ports["airplay"], ports["dlna"], ports["spotify"], avahi_mode,
                    ports["miplay"], number("DLNA_BUFFER_MS", 1000, 0, 5000),
@@ -138,7 +151,9 @@ class Config:
                    number("DESKTOP_VOLUME", 100, 0, 100), number("DESKTOP_IDLE_MS", 500, 200, 5000),
                    number("DESKTOP_PLAYER_MS", 30, 5, 200), number("DESKTOP_JITTER_MS", 20, 5, 200),
                    backend, number("DESKTOP_NATIVE_LATENCY_MS", 16, 4, 30),
-                   number("DESKTOP_NATIVE_JITTER_MS", 8, 1, 20))
+                   number("DESKTOP_NATIVE_JITTER_MS", 8, 1, 20), scheduling,
+                   number("OUTPUT_FRAGMENT_MS", 2, 1, 20), number("OUTPUT_FRAGMENTS", 3, 2, 8),
+                   realtime == "true")
 
 
 def atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
@@ -242,7 +257,13 @@ def pulse_config(config: Config) -> str:
         scheduling = " norewinds=true" if config.desktop_enabled else ""
         lines.append(f"load-module module-null-sink sink_name=output rate={config.sample_rate} channels=2{scheduling}")
     else:
-        lines.append(f"load-module module-alsa-sink sink_name=output device={config.audio_device} rate={config.sample_rate} channels=2")
+        scheduling = ""
+        if config.output_scheduling == "interrupt":
+            # Fragment bytes refer to the requested s16le stereo sample spec;
+            # plughw converts to the DAC's native format without extra queueing.
+            fragment = config.sample_rate * config.output_fragment_ms // 1000 * 4
+            scheduling = f" format=s16le tsched=0 fragments={config.output_fragments} fragment_size={fragment}"
+        lines.append(f"load-module module-alsa-sink sink_name=output device={config.audio_device} rate={config.sample_rate} channels=2{scheduling}")
     lines += ["set-default-sink discard", "set-default-source discard.monitor", "set-sink-mute output yes",
               # Pulse CLI uses integer software volume (65536 = 100%).
               f"set-sink-volume output {round(config.output_volume * 65536 / 100)}",
@@ -324,6 +345,7 @@ def receiver_commands(config: Config, identity: str, address: str = "") -> dict[
                                    "--jitter-ms", str(config.desktop_native_jitter_ms),
                                    "--idle-ms", str(config.desktop_idle_ms),
                                    "--gain", str(config.desktop_volume / 100), "--managed",
+                                   *(["--realtime"] if config.pulse_realtime else []),
                                    "--control", "/run/lan-audio/desktop-control.sock"]
     return selected
 
@@ -811,6 +833,10 @@ class Runtime:
                               "desktop_jitter_ms": self.config.desktop_jitter_ms,
                               "desktop_native_latency_ms": self.config.desktop_native_latency_ms,
                               "desktop_native_jitter_ms": self.config.desktop_native_jitter_ms},
+                  "output": {"scheduling": self.config.output_scheduling,
+                             "fragment_ms": self.config.output_fragment_ms,
+                             "fragments": self.config.output_fragments,
+                             "pulse_realtime": self.config.pulse_realtime},
                   "route_module": self.pulse.route_module, "children": self.supervisor.statuses()}
         status["desktop"] = {"enabled": self.config.desktop_enabled,
                              "active": self.pulse.desktop_active,
@@ -907,7 +933,11 @@ class Runtime:
             self.wait_ready(lambda: Path("/run/avahi-daemon/socket").exists())
         self.supervisor.add("pulse", ["dbus-run-session", "--", "pulseaudio", "--daemonize=no", "--disallow-exit",
                                       "--exit-idle-time=-1", "--use-pid-file=no", "--log-target=stderr",
-                                      "--log-level=notice", "--realtime=no", "--high-priority=no",
+                                      "--log-level=notice",
+                                      # Realtime needs an RLIMIT_RTPRIO grant from the container;
+                                      # without it PulseAudio logs a warning and keeps normal priority.
+                                      *(["--realtime=yes", "--high-priority=yes"]
+                                        if self.config.pulse_realtime else ["--realtime=no", "--high-priority=no"]),
                                       *(["--resample-method=speex-float-5"] if isinstance(self.pulse, NativePulse) else []),
                                       "--disable-shm=yes", "-n", "--file=/run/lan-audio/pulse.pa"],
                             core=True, context=self.pulse_context)

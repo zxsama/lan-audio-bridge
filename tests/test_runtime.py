@@ -217,6 +217,20 @@ class ConfigurationTests(unittest.TestCase):
         text = pulse_config(Config(audio_device="hw:CARD=USB,DEV=0"))
         self.assertEqual(text.count("module-alsa-sink"), 1)
         self.assertIn("device=hw:CARD=USB,DEV=0", text)
+        self.assertNotIn("tsched=0", text)
+
+    def test_interrupt_scheduling_bounds_the_hardware_queue(self):
+        config = Config.from_env({"AUDIO_DEVICE": "plughw:CARD=DAC,DEV=0", "OUTPUT_SCHEDULING": "interrupt",
+                                  "OUTPUT_FRAGMENT_MS": "2", "OUTPUT_FRAGMENTS": "3"})
+        line = next(row for row in pulse_config(config).splitlines() if "module-alsa-sink" in row)
+        # 2 ms of 48 kHz s16le stereo = 96 frames x 4 bytes.
+        self.assertTrue(line.endswith("format=s16le tsched=0 fragments=3 fragment_size=384"), line)
+        self.assertEqual(Config.from_env({"AUDIO_MODE": "null"}).output_scheduling, "timer")
+        for key, value in (("OUTPUT_SCHEDULING", "fast"), ("OUTPUT_FRAGMENT_MS", "0"), ("OUTPUT_FRAGMENT_MS", "21"),
+                           ("OUTPUT_FRAGMENTS", "1"), ("OUTPUT_FRAGMENTS", "9"), ("PULSE_REALTIME", "yes")):
+            with self.subTest(key=key, value=value), self.assertRaises(BridgeError):
+                Config.from_env({"AUDIO_MODE": "null", key: value})
+        self.assertTrue(Config.from_env({"AUDIO_MODE": "null", "PULSE_REALTIME": "true"}).pulse_realtime)
 
     def test_alsa_and_null_output_start_muted_and_suspended(self):
         for mode in ("alsa", "null"):

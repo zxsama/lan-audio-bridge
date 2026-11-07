@@ -39,7 +39,7 @@ python3 -B -m unittest discover -s tests -p test_runtime.py -v
 测试配置使用 bridge 网络、独立 Docker volume 和 null 输出，不映射 `/dev/snd`，不发布端口，也不会播放到真实声卡。在 Linux/WSL 项目目录构建并运行独立测试实例：
 
 ```sh
-docker build -t lan-audio-bridge:0.4.0 .
+docker build -t lan-audio-bridge:0.5.0 .
 docker compose -f compose.test.yaml config --quiet
 docker compose -f compose.test.yaml up -d --wait --wait-timeout 120
 python3 -B tests/integration.py
@@ -68,7 +68,7 @@ docker compose -f compose.test.yaml down
 构建当前镜像后，可独立执行：
 
 ```sh
-python3 -B tests/host_avahi.py --image lan-audio-bridge:0.4.0
+python3 -B tests/host_avahi.py --image lan-audio-bridge:0.5.0
 ```
 
 该脚本在临时 Docker 网络命名空间中模拟独占 5353 的 Avahi、私有 D-Bus 和独立过滤代理，使用独立资源前缀并清理测试资源；不使用真实 host network、宿主 D-Bus、声卡、账号或发布端口。应检查代理访问限制、动态服务公告与失联恢复的实际输出。本节提供运行方法，各版本的执行结果见相应验证记录；新的执行结果应单独记录。
@@ -95,7 +95,7 @@ python3 -B tests/host_avahi.py --image lan-audio-bridge:0.4.0
 
 ## VBAN 与双路混音
 
-`test_vban.py` 验证 PCM 包解析、源地址与流名匹配、序列及空闲生命周期。`test_runtime.py` 同时覆盖双路路由、握手状态与增益。以下测试使用已构建的 0.4.0 镜像：
+`test_vban.py` 验证 PCM 包解析、源地址与流名匹配、序列及空闲生命周期。`test_runtime.py` 同时覆盖双路路由、握手状态与增益。以下测试使用已构建的 0.5.0 镜像：
 
 ```sh
 docker compose -f compose.desktop-test.yaml up -d --wait --wait-timeout 120
@@ -127,6 +127,26 @@ docker compose -f compose.native-test.yaml down --volumes
 ```
 
 `test_native_runtime.py` 覆盖控制身份、phone 路由建立顺序、HOLD 混音余量、故障退出竞态、旧流清理及 Unix socket 生命周期。`native_vban.py` 提供独立原生进程的 PCM、重排、欠载和延迟测量，详见[原生接收器说明](../native/README.md)。结果边界见[延迟验证](latency.md)。
+
+`compose.e2e-test.yaml` 是另一份独立测试环境：host 网络、null 输出、原生后端，并把工作区 `app/` 只读挂载到 `/app`，无需重建镜像即可测试运行时改动。`PULSE_REALTIME` 等参数可用 `E2E_*` 环境变量覆盖。
+
+```sh
+docker compose -f compose.e2e-test.yaml up -d --wait
+docker compose -f compose.e2e-test.yaml exec -T audio python3 /workspace/tests/native_vban.py   --binary /usr/local/bin/vban-pulse --output /tmp/burst --seconds 30 --latency-ms 16 --jitter-ms 8 --burst-ms 10
+docker compose -f compose.e2e-test.yaml exec -T audio python3 /workspace/tests/native_watch.py --seconds 30
+docker compose -f compose.e2e-test.yaml down --volumes
+```
+
+`--burst-ms` 模拟 WASAPI loopback 按引擎周期整块交付。`native_watch.py` 每 50 ms 读取接收器 STATUS，输出队列、延迟、调速和欠载时间序列。`e2e_echo.py` 在容器内检测 `output.monitor` 上的标记起点并经 UDP 回传，供发送端用自己的时钟计时；WSL2 时钟相对 Windows 漂移，Windows 发送到 WSL 接收的结果不代表真实设备，只能用于功能检查。
+
+## Windows 原生发送端
+
+```powershell
+native\windowsuild.cmd
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows-sender.Tests.ps1
+```
+
+`build.cmd` 用 MSVC x64（`/W4 /WX`）生成 `dist\windowsban-sender.exe`。测试只覆盖端点筛选、配置生成和启动项命令，不改变音频设备或启动项；2026-11-07 在 Windows PowerShell 5.1 中通过 20 项。安装与设备行为见 [Windows 原生发送端](windows-sender.md)。
 
 ## Windows 配置脚本
 
