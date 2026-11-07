@@ -31,6 +31,11 @@ or `default`. It relies only on the container's `rtprio`/`nice` limits.
 idle but suspends it only after N ms; renewed activity cancels the suspend, so
 the next sound does not wait for the device to resume. Status reports
 `suspend_pending_ms`. `tests/native_vban.py --suspend-delay-ms N` checks it.
+After a server overflow (PulseAudio "Failed to push data into queue", which
+still advances the server write index) the next write is realigned to the read
+position plus the jitter duration, exactly like the underrun recovery, so a device
+stall cannot leave every later write failing. `tests/native_vban.py --stall-ms N`
+freezes the private Pulse server every 5 s as a stall fixture.
 `--keep-awake` additionally keeps the muted output running while packets keep
 arriving (a connected sender transmits silence too) and resumes it when a sender
 connects; `--keep-awake` in the test checks that 3 s of silent packets keep the

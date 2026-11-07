@@ -204,6 +204,8 @@ def main():
                         help="Explicit monitor observation gate; hardware-floor fixtures may need a larger bound")
     parser.add_argument("--suspend-delay-ms", type=int, default=0,
                         help="Pass to the receiver and check the output stays awake that long after idle")
+    parser.add_argument("--stall-ms", type=int, default=0,
+                        help="Freeze the private Pulse server this long every 5 s of solo playback (device-stall fixture)")
     parser.add_argument("--keep-awake", action="store_true",
                         help="Pass --keep-awake and check a connected silent sender keeps the output awake")
     parser.add_argument("--burst-ms", type=float, default=0,
@@ -280,7 +282,22 @@ void pa_sink_set_latency_range(void *sink, uint64_t minimum, uint64_t maximum) {
             time.sleep(.2)
             marker_times = [0] + list(range(2, args.seconds))
             sender_timing = {}
+            stalls = []
+            stall_done = threading.Event()
+            def stall_server():
+                import signal
+                while not stall_done.wait(5):
+                    os.kill(pulse.pid, signal.SIGSTOP)
+                    time.sleep(args.stall_ms / 1000)
+                    os.kill(pulse.pid, signal.SIGCONT)
+                    stalls.append(time.monotonic())
+            staller = threading.Thread(target=stall_server, daemon=True) if args.stall_ms else None
+            if staller:
+                staller.start()
             submitted = send(args.seconds, marker_times=marker_times, drift_ppm=args.drift_ppm, telemetry=sender_timing)
+            stall_done.set()
+            if staller:
+                staller.join(timeout=2)
             wait_for(lambda: len(monitor.detected) >= len(submitted))
             running = control.command()
             if running.get("rate_pending"):
@@ -400,7 +417,7 @@ void pa_sink_set_latency_range(void *sink, uint64_t minimum, uint64_t maximum) {
             result = {"ok": True, "measurement": "same-container UDP send to output.monitor read; includes monitor buffering",
                 "excludes": "Windows capture, physical LAN, ALSA DAC and speaker", "solo_seconds": args.seconds,
                 "configured_latency_ms": args.latency_ms, "configured_jitter_ms": args.jitter_ms,
-                "sender_drift_ppm": args.drift_ppm, "burst_ms": args.burst_ms, "suspend_check": suspend_check,
+                "sender_drift_ppm": args.drift_ppm, "burst_ms": args.burst_ms, "suspend_check": suspend_check, "stall_ms": args.stall_ms, "stalls": len(stalls) if args.stall_ms else 0,
                 "sender_timing": sender_timing,
                 "monitor_clock": solo_clock, "record_ms": args.record_ms,
                 "resample_method": args.resample_method,

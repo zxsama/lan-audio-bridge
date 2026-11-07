@@ -48,7 +48,7 @@ struct app {
     uint64_t last_valid, last_nonzero, started, gap_since, last_report, last_adjust;
     double backlog_ewma, target_backlog, client_target, integral, ppm; unsigned playback_rate;
     pa_usec_t latency; int latency_negative; double gain;
-    int64_t phone, held_phone; bool phone_pending, ending, syncing, sync_active, sync_mix, managed, managed_ready;
+    int64_t phone, held_phone; bool phone_pending, ending, syncing, sync_active, sync_mix, managed, managed_ready, overflow_pending;
     unsigned revision, synced_revision, sync_revision, sync_stage;
     int64_t sync_phone; double sync_gain; struct reply replies[16]; bool timing_pending, underrun_pending;
     unsigned desired_rate, inflight_rate, server_rate, rate_acks; bool rate_pending;
@@ -329,12 +329,13 @@ static void pump(struct app *a, uint64_t now) {
         if (count > writable) count = writable;
         /* With prebuf=0 the server may read beyond the write index. Start fresh
          * after a real underrun instead of writing indefinitely behind playback. */
-        int64_t offset = a->underrun_pending ? BYTE_RATE * a->jitter_ms / 1000 : 0;
-        pa_seek_mode_t seek = a->underrun_pending ? PA_SEEK_RELATIVE_ON_READ : PA_SEEK_RELATIVE;
+        bool realign = a->underrun_pending || a->overflow_pending;
+        int64_t offset = realign ? BYTE_RATE * a->jitter_ms / 1000 : 0;
+        pa_seek_mode_t seek = realign ? PA_SEEK_RELATIVE_ON_READ : PA_SEEK_RELATIVE;
         if (pa_stream_write(a->stream, p->pcm + p->offset, count, NULL, offset, seek) < 0) {
             a->pumping = false; fail(a, "PCM write"); return;
         }
-        a->underrun_pending = false;
+        a->underrun_pending = false; a->overflow_pending = false;
         p->offset += count; a->queued -= count; a->stats.written_bytes += count;
         writable -= count; wrote += count;
         if (p->offset == p->size) { a->previous_size = p->size; p->used = false; a->next_sequence++; }
@@ -422,7 +423,14 @@ static void write_ready(pa_stream *stream, size_t count, void *userdata) { (void
 static void underflow(pa_stream *stream, void *userdata) { (void)stream; struct app *a = userdata; if (a->active) { a->stats.underflow++; a->underrun_pending = true; notify(a, "underflow"); diag(a, "underflow"); } }
 /* The server dropped written PCM because its queue was full (PulseAudio logs
  * "Failed to push data into queue"). */
-static void overflow(pa_stream *stream, void *userdata) { (void)stream; struct app *a = userdata; a->stats.server_overflow++; notify(a, "server_overflow"); diag(a, "server_overflow"); }
+static void overflow(pa_stream *stream, void *userdata) {
+    (void)stream; struct app *a = userdata; a->stats.server_overflow++;
+    /* A rejected push still advances the server write index, so after a device
+     * stall the write position stays too far ahead and every later write fails
+     * too (measured: 1052 consecutive failures). Realign on the next write. */
+    a->overflow_pending = true;
+    notify(a, "server_overflow"); diag(a, "server_overflow");
+}
 static void attr_changed(pa_stream *stream, void *userdata) {
     (void)stream;
     struct app *a = userdata;
@@ -514,7 +522,9 @@ static void timer_tick(pa_mainloop_api *api, pa_time_event *event, const struct 
             diag(a, "connected");
         }
         if (a->suspend_at && now >= a->suspend_at && !a->syncing) {
-            if (connected) a->suspend_at = now + 1000000;
+            /* Still connected: postpone by the full delay, so a short packet gap
+             * cannot suspend (and then audibly resume) the device. */
+            if (connected) a->suspend_at = now + (a->suspend_delay_ms ? a->suspend_delay_ms : 1000) * 1000ULL;
             else {
                 a->suspend_at = 0;
                 /* The last reconcile found nothing active; a later activation reconciles again and resumes. */
