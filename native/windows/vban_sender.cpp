@@ -50,7 +50,7 @@ struct Options {
     unsigned frames = 128;      // VBAN frames per datagram, 1..256
     bool endpoint_volume = true;
     bool keeper = true;         // hold the endpoint's minimum engine period
-    unsigned idle_ms = 2000;    // stop sending digital silence after this long
+    unsigned idle_ms = 2000;    // stop sending digital silence after this long; 0 = keep the stream connected
     unsigned stats_ms = 0;
     bool list = false;
     wchar_t log_path[MAX_PATH] = L"";
@@ -278,7 +278,7 @@ struct Sender {
         bool audible = false;
         if (input && wanted > 0) for (unsigned i = 0; i < count * channels && !audible; i++) audible = input[i] != 0.0f;
         if (audible) last_audible = now;
-        bool want_send = audible || now - last_audible < g_opt.idle_ms;
+        bool want_send = audible || !g_opt.idle_ms || now - last_audible < g_opt.idle_ms;
         if (!want_send) { stats.suppressed++; sending = false; return; }
         sending = true;
         for (unsigned done = 0; done < count;) {
@@ -376,6 +376,21 @@ HRESULT run_session(IMMDeviceEnumerator *enumerator, Sender &sender) {
     double last = 0;
     if (FAILED(hr)) goto done;
     describe(device, name, 256); device->GetId(&id);
+    if (g_opt.prefer_count && id) {
+        bool preferred = false;
+        for (unsigned i = 0; i < g_opt.prefer_count; i++) preferred = preferred || !_wcsicmp(id, g_opt.prefer[i]);
+        if (!preferred) {
+            // The user chose another output (e.g. headphones): send nothing, so the
+            // NAS idles normally, and leave that device's engine period alone.
+            char jname[600]; json_text(name, jname, sizeof(jname));
+            log("{\"event\":\"standby\",\"device\":\"%s\"}\n", jname);
+            sender.sending = false;
+            HANDLE waits[2] = {g_stop, g_reopen};
+            DWORD w = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+            hr = w == WAIT_OBJECT_0 ? S_OK : AUDCLNT_E_DEVICE_INVALIDATED;
+            goto done;
+        }
+    }
     hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void **)&client);
     if (FAILED(hr)) goto done;
     hr = client->GetMixFormat(&mix);
@@ -591,7 +606,9 @@ int wmain(int argc, wchar_t **argv) {
         if (!wcscmp(a, L"--target")) { if (wcslen(v) >= 64) return usage(); wcscpy_s(g_opt.target, v); }
         else if (!wcscmp(a, L"--port")) { if (!parse_unsigned(v, 1, 65535, g_opt.port)) return usage(); }
         else if (!wcscmp(a, L"--frames")) { if (!parse_unsigned(v, 16, kMaxVbanFrames, g_opt.frames)) return usage(); }
-        else if (!wcscmp(a, L"--idle-ms")) { if (!parse_unsigned(v, 200, 600000, g_opt.idle_ms)) return usage(); }
+        else if (!wcscmp(a, L"--idle-ms")) {
+            if (!parse_unsigned(v, 0, 600000, g_opt.idle_ms) || (g_opt.idle_ms && g_opt.idle_ms < 200)) return usage();
+        }
         else if (!wcscmp(a, L"--stats-ms")) { if (!parse_unsigned(v, 100, 3600000, g_opt.stats_ms)) return usage(); }
         else if (!wcscmp(a, L"--device")) { if (wcslen(v) >= 512) return usage(); wcscpy_s(g_opt.device, v); }
         else if (!wcscmp(a, L"--prefer")) {

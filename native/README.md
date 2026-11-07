@@ -31,6 +31,10 @@ or `default`. It relies only on the container's `rtprio`/`nice` limits.
 idle but suspends it only after N ms; renewed activity cancels the suspend, so
 the next sound does not wait for the device to resume. Status reports
 `suspend_pending_ms`. `tests/native_vban.py --suspend-delay-ms N` checks it.
+`--keep-awake` additionally keeps the muted output running while packets keep
+arriving (a connected sender transmits silence too) and resumes it when a sender
+connects; `--keep-awake` in the test checks that 3 s of silent packets keep the
+output awake and that it suspends after they stop. Status reports `keep_awake`/`awake`.
 
 The `--source-ip` argument is mandatory. The stream name must occupy 1–16 bytes.
 Only the configured IPv4 source, stream name, PCM format and exact packet length

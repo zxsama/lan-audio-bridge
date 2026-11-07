@@ -204,6 +204,8 @@ def main():
                         help="Explicit monitor observation gate; hardware-floor fixtures may need a larger bound")
     parser.add_argument("--suspend-delay-ms", type=int, default=0,
                         help="Pass to the receiver and check the output stays awake that long after idle")
+    parser.add_argument("--keep-awake", action="store_true",
+                        help="Pass --keep-awake and check a connected silent sender keeps the output awake")
     parser.add_argument("--burst-ms", type=float, default=0,
                         help="Send in chunks of this period (10 = shared-mode WASAPI loopback)")
     args = parser.parse_args()
@@ -251,7 +253,7 @@ void pa_sink_set_latency_range(void *sink, uint64_t minimum, uint64_t maximum) {
             receiver = subprocess.Popen([str(args.binary), "--source-ip", "127.0.0.1", "--port", "16980",
                 "--control", str(directory / "control.sock"), "--stream-name", "Windows", "--managed",
                 "--latency-ms", str(args.latency_ms), "--jitter-ms", str(args.jitter_ms),
-                "--suspend-delay-ms", str(args.suspend_delay_ms)],
+                "--suspend-delay-ms", str(args.suspend_delay_ms), *(["--keep-awake"] if args.keep_awake else [])],
                 stdout=logs[1], stderr=logs[2], env=env)
             wait_for(lambda: (directory / "control.sock").exists())
             control = Control(directory / "control.sock", directory)
@@ -308,7 +310,25 @@ void pa_sink_set_latency_range(void *sink, uint64_t minimum, uint64_t maximum) {
                 sinks = json.loads(subprocess.check_output(["pactl", "-f", "json", "list", "sinks"], env=env))
                 return next(row["state"] for row in sinks if row["name"] == "output")
             suspend_check = None
-            if args.suspend_delay_ms:
+            if args.keep_awake:
+                # Continuous digital silence: the session stays idle, the output awake.
+                quiet = struct.pack("<hh", 0, 0) * FRAMES
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+                    start = time.monotonic()
+                    for sequence in range(int(3 * RATE / FRAMES)):
+                        delay = start + sequence * FRAMES / RATE - time.monotonic()
+                        if delay > 0:
+                            time.sleep(delay)
+                        sender.sendto(HEADER.pack(b"VBAN", 3, FRAMES - 1, 1, 1, b"Windows", 50000 + sequence) + quiet,
+                                      ("127.0.0.1", 16980))
+                awake_state = output_state()
+                quiet_status = control.command()
+                assert awake_state != "SUSPENDED" and not quiet_status["active"] and quiet_status["awake"], (awake_state, quiet_status)
+                stopped_at = time.monotonic()
+                wait_for(lambda: output_state() == "SUSPENDED", timeout=args.suspend_delay_ms / 1000 + 4)
+                suspend_check = {"silent_sender_kept_awake": True,
+                                 "suspended_after_stop_ms": (time.monotonic() - stopped_at) * 1000}
+            if args.suspend_delay_ms and not args.keep_awake:
                 idle_at = time.monotonic()
                 assert output_state() != "SUSPENDED", "Output suspended before the configured delay"
                 wait_for(lambda: output_state() == "SUSPENDED", timeout=args.suspend_delay_ms / 1000 + 3)

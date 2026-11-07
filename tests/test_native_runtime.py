@@ -42,6 +42,14 @@ class NativeConfigTests(unittest.TestCase):
         command = receiver_commands(config, "test")["desktop"]
         self.assertEqual(command[command.index("--suspend-delay-ms") + 1], "60000")
         self.assertIn("--realtime", command)
+        self.assertNotIn("--keep-awake", command)
+        config = Config.from_env({"AUDIO_MODE": "null", "ENABLE_DESKTOP": "true", "VBAN_SOURCE_IP": "192.0.2.10",
+                                  "DESKTOP_BACKEND": "native", "DESKTOP_KEEP_AWAKE": "true", "DIAGNOSTICS_STATUS": "true"})
+        self.assertIn("--keep-awake", receiver_commands(config, "test")["desktop"])
+        self.assertTrue(config.diagnostics_status)
+        for key in ("DESKTOP_KEEP_AWAKE", "DIAGNOSTICS_STATUS"):
+            with self.subTest(key=key), self.assertRaises(BridgeError):
+                Config.from_env({"AUDIO_MODE": "null", key: "1"})
         for value in ("-1", "600001", "1e3"):
             with self.subTest(value=value), self.assertRaises(BridgeError):
                 Config.from_env({"AUDIO_MODE": "null", "OUTPUT_IDLE_SUSPEND_MS": value})

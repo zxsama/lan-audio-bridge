@@ -95,7 +95,8 @@ function New-SenderConfigLines {
     $bytes = [Text.Encoding]::UTF8.GetByteCount($StreamName)
     if ($bytes -lt 1 -or $bytes -gt 16 -or $StreamName -match '[\x00-\x1f]') { throw 'StreamName must be 1..16 UTF-8 bytes without control characters.' }
     if ($Prefer.Count -gt 8) { throw 'At most 8 preferred endpoints are supported.' }
-    $lines = @('--target', $Address, '--port', [string]$Port, '--stream', $StreamName, '--stats-ms', '60000')
+    # --idle-ms 0: keep sending silence so the NAS output stays connected and awake.
+    $lines = @('--target', $Address, '--port', [string]$Port, '--stream', $StreamName, '--stats-ms', '60000', '--idle-ms', '0')
     foreach ($id in $Prefer) { Assert-SenderEndpointId $id; $lines += @('--prefer', $id) }
     if ($LogPath) {
         if ($LogPath -match '[\r\n]') { throw 'Invalid log path.' }

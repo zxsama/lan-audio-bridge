@@ -56,6 +56,9 @@ struct app {
     uint64_t control_time; pa_usec_t configured_sink_usec; bool target_negotiated;
     const char *scheduling;
     unsigned suspend_delay_ms; uint64_t suspend_at; /* deferred idle suspend; 0 = none pending */
+    bool keep_awake, awake; /* keep the muted output running while the sender is connected */
+    unsigned session_trace; /* next startup trace point index */
+    double fresh_buffered_ms; uint64_t fresh_at; /* server queue at the last timing reply */
     uint64_t diag_window; unsigned diag_count, diag_suppressed;
 };
 static volatile sig_atomic_t stopped;
@@ -91,11 +94,12 @@ static void status_json(struct app *a, char *out, size_t size, const char *event
     if (count <= 0 || (size_t)count >= size) goto truncated;
     size_t used = (size_t)count;
     count = snprintf(out + used - 1, size - used + 1,
-        ",\"rate_ack\":%u,\"rate_pending\":%s,\"server_rate\":%u,\"resampler\":\"%s\",\"read_index\":%" PRId64 ",\"write_index\":%" PRId64 ",\"sink_usec\":%" PRIu64 ",\"transport_usec\":%" PRIu64 ",\"monotonic_us\":%" PRIu64 ",\"effective_target_us\":%.1f,\"configured_sink_us\":%" PRIu64 ",\"target_negotiated\":%s,\"scheduling\":\"%s\",\"suspend_pending_ms\":%.0f,\"server_overflow\":%" PRIu64 "}",
+        ",\"rate_ack\":%u,\"rate_pending\":%s,\"server_rate\":%u,\"resampler\":\"%s\",\"read_index\":%" PRId64 ",\"write_index\":%" PRId64 ",\"sink_usec\":%" PRIu64 ",\"transport_usec\":%" PRIu64 ",\"monotonic_us\":%" PRIu64 ",\"effective_target_us\":%.1f,\"configured_sink_us\":%" PRIu64 ",\"target_negotiated\":%s,\"scheduling\":\"%s\",\"suspend_pending_ms\":%.0f,\"server_overflow\":%" PRIu64 ",\"keep_awake\":%s,\"awake\":%s}",
         a->rate_acks, a->rate_pending ? "true" : "false", a->server_rate, a->resampler,
         a->read_index, a->write_index, (uint64_t)a->sink_usec, (uint64_t)a->transport_usec, mono_us(),
         a->target_backlog, (uint64_t)a->configured_sink_usec, a->target_negotiated ? "true" : "false", a->scheduling,
-        a->suspend_at > mono_us() ? (a->suspend_at - mono_us()) / 1000.0 : 0.0, a->stats.server_overflow);
+        a->suspend_at > mono_us() ? (a->suspend_at - mono_us()) / 1000.0 : 0.0, a->stats.server_overflow,
+        a->keep_awake ? "true" : "false", a->awake ? "true" : "false");
     if (count >= 0 && (size_t)count < size - used + 1) return;
 truncated:
     fprintf(stderr, "status JSON exceeded its buffer\n");
@@ -110,14 +114,15 @@ static void diag(struct app *a, const char *event) {
         a->diag_window = now; a->diag_count = 0; a->diag_suppressed = 0;
     }
     if (a->diag_count++ >= 5) { a->diag_suppressed++; return; }
-    const pa_timing_info *timing = a->ready ? pa_stream_get_timing_info(a->stream) : NULL;
     const pa_buffer_attr *attr = a->ready ? pa_stream_get_buffer_attr(a->stream) : NULL;
-    double server_ms = timing && !timing->read_index_corrupt && !timing->write_index_corrupt
-        ? (timing->write_index - timing->read_index) * 1000.0 / BYTE_RATE : -1;
-    fprintf(stderr, "vban-pulse: %s phase=%s queued_ms=%.1f server_queue_ms=%.1f latency_ms=%.1f ppm=%.0f "
+    /* Between timing replies the client advances write_index locally while
+     * read_index is stale; only the value captured in a reply is meaningful. */
+    double server_ms = a->fresh_at ? a->fresh_buffered_ms : -1;
+    double server_age_ms = a->fresh_at ? (now - a->fresh_at) / 1000.0 : -1;
+    fprintf(stderr, "vban-pulse: %s phase=%s queued_ms=%.1f server_queue_ms=%.1f age_ms=%.0f latency_ms=%.1f ppm=%.0f "
         "tlength=%u maxlength=%u underflow=%" PRIu64 " server_overflow=%" PRIu64 " ring_overflow=%" PRIu64
         " discontinuities=%" PRIu64 " sessions=%" PRIu64 "\n", event, phase_names[a->phase], a->queued * 1000.0 / BYTE_RATE,
-        server_ms, a->latency / 1000.0, a->ppm, attr ? attr->tlength : 0, attr ? attr->maxlength : 0,
+        server_ms, server_age_ms, a->latency / 1000.0, a->ppm, attr ? attr->tlength : 0, attr ? attr->maxlength : 0,
         a->stats.underflow, a->stats.server_overflow, a->stats.overflow, a->stats.discontinuities, a->stats.sessions);
     fflush(stderr);
 }
@@ -191,7 +196,7 @@ static void sync_next(pa_context *context, int success, void *userdata) {
         break;
     case 3:
         if (a->sync_active) op = pa_context_set_sink_mute_by_name(context, a->sink, 0, sync_next, a);
-        else if (a->suspend_delay_ms) {
+        else if (a->suspend_delay_ms || a->keep_awake) {
             /* Keep the muted device running briefly: resuming a suspended USB DAC
              * took ~120 ms and the audio queued meanwhile persists as extra latency. */
             a->suspend_at = mono_us() + a->suspend_delay_ms * 1000ULL;
@@ -255,7 +260,7 @@ static void begin_idle(struct app *a) {
 static void start_session(struct app *a, uint32_t sequence, uint64_t now) {
     if (a->drain) { pa_operation_cancel(a->drain); unref(a->drain); a->drain = NULL; }
     clear_packets(a); a->next_sequence = sequence; a->highest_sequence = sequence;
-    a->sequence_valid = true; a->active = true; a->ending = false; a->started = now;
+    a->sequence_valid = true; a->active = true; a->ending = false; a->started = now; a->session_trace = 0;
     update_target(a);
     a->backlog_ewma = a->target_backlog;
     a->ppm = 0;
@@ -460,6 +465,7 @@ static void timing_updated(pa_stream *stream, int success, void *userdata) {
     /* Index differences remain valid across rate changes. pa_stream_get_latency
      * interpolation may transiently jump while its time smoother changes rate. */
     double buffered = (timing->write_index - timing->read_index) * 1000000.0 / (a->playback_rate * FRAME_BYTES);
+    a->fresh_buffered_ms = buffered / 1000.0; a->fresh_at = mono_us();
     a->read_index = timing->read_index; a->write_index = timing->write_index;
     a->sink_usec = timing->sink_usec; a->transport_usec = timing->transport_usec;
     double total = fmax(0, buffered + timing->sink_usec + timing->transport_usec);
@@ -490,11 +496,33 @@ static void timer_tick(pa_mainloop_api *api, pa_time_event *event, const struct 
         if (a->active && !a->ending && (a->phase == PLAYING || a->phase == PRIMING) &&
             (now - a->last_valid >= a->idle_ms * 1000U || now - a->last_nonzero >= a->idle_ms * 1000U)) begin_idle(a);
         pump(a, now);
+        bool idle_lanes = !a->active && a->phone < 0 && !a->phone_pending;
+        /* A connected sender sends continuously, silence included. Keep the
+         * device running (muted) so later sounds start without a resume pop. */
+        bool connected = a->keep_awake && a->last_valid && now - a->last_valid < 1000000;
+        if (connected && idle_lanes && !a->awake && !a->syncing && (!a->managed || a->managed_ready)) {
+            unref(pa_context_suspend_sink_by_name(a->context, a->sink, 0, NULL, NULL));
+            a->awake = true;
+            a->suspend_at = now + (a->suspend_delay_ms ? a->suspend_delay_ms : 1000) * 1000ULL;
+            diag(a, "connected");
+        }
         if (a->suspend_at && now >= a->suspend_at && !a->syncing) {
-            a->suspend_at = 0;
-            /* The last reconcile found nothing active; a later activation reconciles again and resumes. */
-            if (!a->active && a->phone < 0 && !a->phone_pending)
-                unref(pa_context_suspend_sink_by_name(a->context, a->sink, 1, NULL, NULL));
+            if (connected) a->suspend_at = now + 1000000;
+            else {
+                a->suspend_at = 0;
+                /* The last reconcile found nothing active; a later activation reconciles again and resumes. */
+                if (idle_lanes) {
+                    unref(pa_context_suspend_sink_by_name(a->context, a->sink, 1, NULL, NULL));
+                    if (a->awake) diag(a, "disconnected");
+                    a->awake = false;
+                }
+            }
+        }
+        /* Startup trace: queue state shortly after a session begins. */
+        static const unsigned trace_ms[] = {200, 1000, 3000, 10000};
+        if (a->active && a->session_trace < 4 && now - a->started >= trace_ms[a->session_trace] * 1000ULL) {
+            char label[32]; snprintf(label, sizeof(label), "session+%ums", trace_ms[a->session_trace]);
+            a->session_trace++; diag(a, label);
         }
         if (a->phase == PLAYING && !a->timing_pending && now - a->last_adjust >= 100000) {
             /* Regulate total application + Pulse backlog, not packet-arrival interval.
@@ -518,6 +546,7 @@ int main(int argc, char **argv) {
     struct app *a = &app; const char *source = NULL; strcpy(a->name, "Windows");
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--managed")) { a->managed = true; continue; }
+        if (!strcmp(argv[i], "--keep-awake")) { a->keep_awake = true; continue; }
         if (!strcmp(argv[i], "--realtime")) {
             /* Best effort within RLIMIT_RTPRIO / RLIMIT_NICE; no capability is required or kept. */
             struct sched_param param = {.sched_priority = 4};

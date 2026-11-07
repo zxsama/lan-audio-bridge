@@ -78,6 +78,11 @@ class Config:
     # Native backend only: keep the muted output running this long after both
     # lanes go idle, so the next sound does not wait for the DAC to resume.
     output_idle_suspend_ms: int = 0
+    # Native backend: keep the muted output running while VBAN packets (silence
+    # included) arrive, so a connected PC never waits for, or hears, a DAC resume.
+    desktop_keep_awake: bool = False
+    # Copy status.json into /data/diagnostics once per second for host-side reading.
+    diagnostics_status: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Config:
@@ -142,9 +147,12 @@ class Config:
         scheduling = env.get("OUTPUT_SCHEDULING", "timer")
         if scheduling not in ("timer", "interrupt"):
             raise BridgeError("OUTPUT_SCHEDULING must be timer or interrupt")
-        realtime = env.get("PULSE_REALTIME", "false").lower()
-        if realtime not in ("true", "false"):
-            raise BridgeError("PULSE_REALTIME must be true or false")
+        flags = {}
+        for key in ("PULSE_REALTIME", "DESKTOP_KEEP_AWAKE", "DIAGNOSTICS_STATUS"):
+            flags[key] = env.get(key, "false").lower()
+            if flags[key] not in ("true", "false"):
+                raise BridgeError(f"{key} must be true or false")
+        realtime = flags["PULSE_REALTIME"]
         return cls(name, mode, device, rate, number("OUTPUT_VOLUME", 100, 0, 100),
                    tuple(enabled), interface, ports["airplay"], ports["dlna"], ports["spotify"], avahi_mode,
                    ports["miplay"], number("DLNA_BUFFER_MS", 1000, 0, 5000),
@@ -156,7 +164,8 @@ class Config:
                    backend, number("DESKTOP_NATIVE_LATENCY_MS", 16, 4, 30),
                    number("DESKTOP_NATIVE_JITTER_MS", 8, 1, 20), scheduling,
                    number("OUTPUT_FRAGMENT_MS", 2, 1, 20), number("OUTPUT_FRAGMENTS", 3, 2, 8),
-                   realtime == "true", number("OUTPUT_IDLE_SUSPEND_MS", 0, 0, 600000))
+                   realtime == "true", number("OUTPUT_IDLE_SUSPEND_MS", 0, 0, 600000),
+                   flags["DESKTOP_KEEP_AWAKE"] == "true", flags["DIAGNOSTICS_STATUS"] == "true")
 
 
 def atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
@@ -350,6 +359,7 @@ def receiver_commands(config: Config, identity: str, address: str = "") -> dict[
                                    "--gain", str(config.desktop_volume / 100), "--managed",
                                    *(["--realtime"] if config.pulse_realtime else []),
                                    "--suspend-delay-ms", str(config.output_idle_suspend_ms),
+                                   *(["--keep-awake"] if config.desktop_keep_awake else []),
                                    "--control", "/run/lan-audio/desktop-control.sock"]
     return selected
 
@@ -843,7 +853,8 @@ class Runtime:
                              "fragment_ms": self.config.output_fragment_ms,
                              "fragments": self.config.output_fragments,
                              "pulse_realtime": self.config.pulse_realtime,
-                             "idle_suspend_ms": self.config.output_idle_suspend_ms},
+                             "idle_suspend_ms": self.config.output_idle_suspend_ms,
+                             "desktop_keep_awake": self.config.desktop_keep_awake},
                   "route_module": self.pulse.route_module, "children": self.supervisor.statuses()}
         status["desktop"] = {"enabled": self.config.desktop_enabled,
                              "active": self.pulse.desktop_active,
@@ -853,7 +864,18 @@ class Runtime:
         if isinstance(self.pulse, NativePulse):
             status["desktop"].update(ready=self.pulse.native_ready, sink_input=self.pulse.native_input,
                                      receiver=self.pulse.native_status)
-        atomic_write(STATUS_PATH, json.dumps(status, separators=(",", ":")) + "\n", 0o644)
+        text = json.dumps(status, separators=(",", ":")) + "\n"
+        atomic_write(STATUS_PATH, text, 0o644)
+        now = time.monotonic()
+        if self.config.diagnostics_status and now - getattr(self, "_diagnostics_written", 0.0) >= 1.0:
+            # Status holds counters and state only (no credentials); readable from the host.
+            self._diagnostics_written = now
+            try:
+                directory = DATA_DIR / "diagnostics"
+                directory.mkdir(exist_ok=True)
+                atomic_write(directory / "status.json", text, 0o644)
+            except OSError:
+                LOG.warning("diagnostics status copy failed")
 
     def prepare(self) -> None:
         import fcntl

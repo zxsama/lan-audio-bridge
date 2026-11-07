@@ -34,8 +34,8 @@ Assert-True ((Select-SenderEndpoints $list @{} 1).Count -eq 1) 'Maximum candidat
 Assert-True ((Select-SenderEndpoints @() @{}).Count -eq 0) 'Empty list yields no candidates'
 
 $config = New-SenderConfigLines '192.168.50.77' 6980 'Windows' @('dell', 'spdif') 'C:\Users\a\sender.log'
-Assert-True (($config -join '|') -eq '--target|192.168.50.77|--port|6980|--stream|Windows|--stats-ms|60000|--prefer|dell|--prefer|spdif|--log|C:\Users\a\sender.log') 'Config is one argument per line'
-Assert-True ((New-SenderConfigLines '10.0.0.2').Count -eq 8) 'Config without preferences or log'
+Assert-True (($config -join '|') -eq '--target|192.168.50.77|--port|6980|--stream|Windows|--stats-ms|60000|--idle-ms|0|--prefer|dell|--prefer|spdif|--log|C:\Users\a\sender.log') 'Config is one argument per line'
+Assert-True ((New-SenderConfigLines '10.0.0.2').Count -eq 10) 'Config without preferences or log'
 foreach ($bad in @('192.168.50', '192.168.050.1', '::1', 'nas.local', '')) {
     Assert-Fails { New-SenderConfigLines $bad } 'Address must be the NAS IPv4 address'
 }
