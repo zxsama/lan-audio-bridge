@@ -55,6 +55,7 @@ struct app {
     char resampler[64]; int64_t read_index, write_index; pa_usec_t sink_usec, transport_usec;
     uint64_t control_time; pa_usec_t configured_sink_usec; bool target_negotiated;
     const char *scheduling;
+    unsigned suspend_delay_ms; uint64_t suspend_at; /* deferred idle suspend; 0 = none pending */
 };
 static volatile sig_atomic_t stopped;
 static uint64_t mono_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000 + t.tv_nsec / 1000; }
@@ -89,10 +90,11 @@ static void status_json(struct app *a, char *out, size_t size, const char *event
     if (count <= 0 || (size_t)count >= size) goto truncated;
     size_t used = (size_t)count;
     count = snprintf(out + used - 1, size - used + 1,
-        ",\"rate_ack\":%u,\"rate_pending\":%s,\"server_rate\":%u,\"resampler\":\"%s\",\"read_index\":%" PRId64 ",\"write_index\":%" PRId64 ",\"sink_usec\":%" PRIu64 ",\"transport_usec\":%" PRIu64 ",\"monotonic_us\":%" PRIu64 ",\"effective_target_us\":%.1f,\"configured_sink_us\":%" PRIu64 ",\"target_negotiated\":%s,\"scheduling\":\"%s\"}",
+        ",\"rate_ack\":%u,\"rate_pending\":%s,\"server_rate\":%u,\"resampler\":\"%s\",\"read_index\":%" PRId64 ",\"write_index\":%" PRId64 ",\"sink_usec\":%" PRIu64 ",\"transport_usec\":%" PRIu64 ",\"monotonic_us\":%" PRIu64 ",\"effective_target_us\":%.1f,\"configured_sink_us\":%" PRIu64 ",\"target_negotiated\":%s,\"scheduling\":\"%s\",\"suspend_pending_ms\":%.0f}",
         a->rate_acks, a->rate_pending ? "true" : "false", a->server_rate, a->resampler,
         a->read_index, a->write_index, (uint64_t)a->sink_usec, (uint64_t)a->transport_usec, mono_us(),
-        a->target_backlog, (uint64_t)a->configured_sink_usec, a->target_negotiated ? "true" : "false", a->scheduling);
+        a->target_backlog, (uint64_t)a->configured_sink_usec, a->target_negotiated ? "true" : "false", a->scheduling,
+        a->suspend_at > mono_us() ? (a->suspend_at - mono_us()) / 1000.0 : 0.0);
     if (count >= 0 && (size_t)count < size - used + 1) return;
 truncated:
     fprintf(stderr, "status JSON exceeded its buffer\n");
@@ -162,11 +164,18 @@ static void sync_next(pa_context *context, int success, void *userdata) {
         op = pa_context_set_sink_input_volume(context, pa_stream_get_index(a->stream), &volume, sync_next, a); break;
     case 2:
         if (a->managed && !a->managed_ready) { a->sync_stage = 4; sync_next(context, 1, a); return; }
+        if (a->sync_active) a->suspend_at = 0;
         if (a->sync_active) op = pa_context_suspend_sink_by_name(context, a->sink, 0, sync_next, a);
         else op = pa_context_set_sink_mute_by_name(context, a->sink, 1, sync_next, a);
         break;
     case 3:
         if (a->sync_active) op = pa_context_set_sink_mute_by_name(context, a->sink, 0, sync_next, a);
+        else if (a->suspend_delay_ms) {
+            /* Keep the muted device running briefly: resuming a suspended USB DAC
+             * took ~120 ms and the audio queued meanwhile persists as extra latency. */
+            a->suspend_at = mono_us() + a->suspend_delay_ms * 1000ULL;
+            sync_next(context, 1, a); return;
+        }
         else op = pa_context_suspend_sink_by_name(context, a->sink, 1, sync_next, a);
         break;
     default:
@@ -456,6 +465,12 @@ static void timer_tick(pa_mainloop_api *api, pa_time_event *event, const struct 
         if (a->active && !a->ending && (a->phase == PLAYING || a->phase == PRIMING) &&
             (now - a->last_valid >= a->idle_ms * 1000U || now - a->last_nonzero >= a->idle_ms * 1000U)) begin_idle(a);
         pump(a, now);
+        if (a->suspend_at && now >= a->suspend_at && !a->syncing) {
+            a->suspend_at = 0;
+            /* The last reconcile found nothing active; a later activation reconciles again and resumes. */
+            if (!a->active && a->phone < 0 && !a->phone_pending)
+                unref(pa_context_suspend_sink_by_name(a->context, a->sink, 1, NULL, NULL));
+        }
         if (a->phase == PLAYING && !a->timing_pending && now - a->last_adjust >= 100000) {
             /* Regulate total application + Pulse backlog, not packet-arrival interval.
              * Low-pass a full second and bound correction/slew to avoid audible pitch jumps. */
@@ -496,6 +511,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(option, "--latency-ms")) a->latency_ms = number(value, 4, 30);
         else if (!strcmp(option, "--jitter-ms")) a->jitter_ms = number(value, 1, 20);
         else if (!strcmp(option, "--idle-ms")) a->idle_ms = number(value, 100, 5000);
+        else if (!strcmp(option, "--suspend-delay-ms")) a->suspend_delay_ms = number(value, 0, 600000);
         else if (!strcmp(option, "--gain")) { char *end; a->gain = strtod(value, &end); if (end == value || *end || !isfinite(a->gain) || a->gain < 0 || a->gain > 1) return 2; }
         else if (!strcmp(option, "--stream-name") || !strcmp(option, "--stream")) { if (!*value || strlen(value) > 16) return 2; strcpy(a->name, value); }
         else { fprintf(stderr, "Unknown option: %s\n", option); return 2; }

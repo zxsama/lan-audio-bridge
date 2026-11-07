@@ -31,6 +31,20 @@ class NativeConfigTests(unittest.TestCase):
         self.assertNotIn("desktop_bus", pulse_config(config))
         self.assertEqual(config.desktop_native_latency_ms, 16)
         self.assertEqual(config.desktop_native_jitter_ms, 8)
+        # Defaults keep the immediate idle suspend and normal priority.
+        self.assertEqual(command[command.index("--suspend-delay-ms") + 1], "0")
+        self.assertNotIn("--realtime", command)
+
+    def test_idle_suspend_delay_and_realtime_reach_the_receiver(self):
+        config = Config.from_env({"AUDIO_MODE": "null", "ENABLE_DESKTOP": "true", "VBAN_SOURCE_IP": "192.0.2.10",
+                                  "DESKTOP_BACKEND": "native", "OUTPUT_IDLE_SUSPEND_MS": "60000",
+                                  "PULSE_REALTIME": "true"})
+        command = receiver_commands(config, "test")["desktop"]
+        self.assertEqual(command[command.index("--suspend-delay-ms") + 1], "60000")
+        self.assertIn("--realtime", command)
+        for value in ("-1", "600001", "1e3"):
+            with self.subTest(value=value), self.assertRaises(BridgeError):
+                Config.from_env({"AUDIO_MODE": "null", "OUTPUT_IDLE_SUSPEND_MS": value})
 
     def test_default_retains_existing_receiver(self):
         config = Config(desktop_enabled=True)

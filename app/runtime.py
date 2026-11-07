@@ -75,6 +75,9 @@ class Config:
     output_fragment_ms: int = 2
     output_fragments: int = 3
     pulse_realtime: bool = False
+    # Native backend only: keep the muted output running this long after both
+    # lanes go idle, so the next sound does not wait for the DAC to resume.
+    output_idle_suspend_ms: int = 0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Config:
@@ -153,7 +156,7 @@ class Config:
                    backend, number("DESKTOP_NATIVE_LATENCY_MS", 16, 4, 30),
                    number("DESKTOP_NATIVE_JITTER_MS", 8, 1, 20), scheduling,
                    number("OUTPUT_FRAGMENT_MS", 2, 1, 20), number("OUTPUT_FRAGMENTS", 3, 2, 8),
-                   realtime == "true")
+                   realtime == "true", number("OUTPUT_IDLE_SUSPEND_MS", 0, 0, 600000))
 
 
 def atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
@@ -346,6 +349,7 @@ def receiver_commands(config: Config, identity: str, address: str = "") -> dict[
                                    "--idle-ms", str(config.desktop_idle_ms),
                                    "--gain", str(config.desktop_volume / 100), "--managed",
                                    *(["--realtime"] if config.pulse_realtime else []),
+                                   "--suspend-delay-ms", str(config.output_idle_suspend_ms),
                                    "--control", "/run/lan-audio/desktop-control.sock"]
     return selected
 
@@ -836,7 +840,8 @@ class Runtime:
                   "output": {"scheduling": self.config.output_scheduling,
                              "fragment_ms": self.config.output_fragment_ms,
                              "fragments": self.config.output_fragments,
-                             "pulse_realtime": self.config.pulse_realtime},
+                             "pulse_realtime": self.config.pulse_realtime,
+                             "idle_suspend_ms": self.config.output_idle_suspend_ms},
                   "route_module": self.pulse.route_module, "children": self.supervisor.statuses()}
         status["desktop"] = {"enabled": self.config.desktop_enabled,
                              "active": self.pulse.desktop_active,

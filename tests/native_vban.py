@@ -202,6 +202,8 @@ def main():
                         help="Test-only fixed null-sink scheduling latency, injected into this private Pulse process")
     parser.add_argument("--max-observed-latency-ms", type=float, default=20,
                         help="Explicit monitor observation gate; hardware-floor fixtures may need a larger bound")
+    parser.add_argument("--suspend-delay-ms", type=int, default=0,
+                        help="Pass to the receiver and check the output stays awake that long after idle")
     parser.add_argument("--burst-ms", type=float, default=0,
                         help="Send in chunks of this period (10 = shared-mode WASAPI loopback)")
     args = parser.parse_args()
@@ -248,7 +250,8 @@ void pa_sink_set_latency_range(void *sink, uint64_t minimum, uint64_t maximum) {
             wait_for(lambda: (directory / "pulse.sock").exists())
             receiver = subprocess.Popen([str(args.binary), "--source-ip", "127.0.0.1", "--port", "16980",
                 "--control", str(directory / "control.sock"), "--stream-name", "Windows", "--managed",
-                "--latency-ms", str(args.latency_ms), "--jitter-ms", str(args.jitter_ms)],
+                "--latency-ms", str(args.latency_ms), "--jitter-ms", str(args.jitter_ms),
+                "--suspend-delay-ms", str(args.suspend_delay_ms)],
                 stdout=logs[1], stderr=logs[2], env=env)
             wait_for(lambda: (directory / "control.sock").exists())
             control = Control(directory / "control.sock", directory)
@@ -301,6 +304,17 @@ void pa_sink_set_latency_range(void *sink, uint64_t minimum, uint64_t maximum) {
             time.sleep(.1)
             assert control.command()["written_bytes"] == idle["written_bytes"], "Idle PCM writes"
             assert idle["state"] == "idle", idle
+            def output_state():
+                sinks = json.loads(subprocess.check_output(["pactl", "-f", "json", "list", "sinks"], env=env))
+                return next(row["state"] for row in sinks if row["name"] == "output")
+            suspend_check = None
+            if args.suspend_delay_ms:
+                idle_at = time.monotonic()
+                assert output_state() != "SUSPENDED", "Output suspended before the configured delay"
+                wait_for(lambda: output_state() == "SUSPENDED", timeout=args.suspend_delay_ms / 1000 + 3)
+                suspend_check = {"configured_ms": args.suspend_delay_ms,
+                                 "observed_after_idle_ms": (time.monotonic() - idle_at) * 1000}
+                assert suspend_check["observed_after_idle_ms"] >= args.suspend_delay_ms * 0.8, suspend_check
             # A live phone lane is staged at discard, then registered before moving to output.
             phone = subprocess.Popen(["pacat", "--playback", "--raw", "--format=s16le", "--rate=48000",
                 "--channels=2", "--latency-msec=10", "--device=discard", "--client-name=native-vban-test-phone"],
@@ -366,7 +380,7 @@ void pa_sink_set_latency_range(void *sink, uint64_t minimum, uint64_t maximum) {
             result = {"ok": True, "measurement": "same-container UDP send to output.monitor read; includes monitor buffering",
                 "excludes": "Windows capture, physical LAN, ALSA DAC and speaker", "solo_seconds": args.seconds,
                 "configured_latency_ms": args.latency_ms, "configured_jitter_ms": args.jitter_ms,
-                "sender_drift_ppm": args.drift_ppm, "burst_ms": args.burst_ms,
+                "sender_drift_ppm": args.drift_ppm, "burst_ms": args.burst_ms, "suspend_check": suspend_check,
                 "sender_timing": sender_timing,
                 "monitor_clock": solo_clock, "record_ms": args.record_ms,
                 "resample_method": args.resample_method,

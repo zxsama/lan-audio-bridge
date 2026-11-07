@@ -27,6 +27,11 @@ Example against an existing, explicitly selected server and output:
 and then normal priority; status `scheduling` reports `fifo`, `nice`, `normal`
 or `default`. It relies only on the container's `rtprio`/`nice` limits.
 
+`--suspend-delay-ms N` (default 0) mutes the output at once when both lanes go
+idle but suspends it only after N ms; renewed activity cancels the suspend, so
+the next sound does not wait for the device to resume. Status reports
+`suspend_pending_ms`. `tests/native_vban.py --suspend-delay-ms N` checks it.
+
 The `--source-ip` argument is mandatory. The stream name must occupy 1–16 bytes.
 Only the configured IPv4 source, stream name, PCM format and exact packet length
 are accepted. Datagram payloads are limited by VBAN to 256 audio frames. The
