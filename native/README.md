@@ -53,8 +53,14 @@ queue once, including a larger client queue required by a hardware latency floor
 Short notifications can start without waiting for another packet.
 The clock controller observes total application/Pulse backlog, smooths it, and
 limits rate correction to ±2000 ppm with a 200 ppm/second slew limit.
-Its total backlog target is the returned client `tlength` duration plus
-`configured_sink_usec`, updated when Pulse changes the negotiated attributes.
+The controller regulates the receiver's own packet ring plus the server's client
+queue against the returned `tlength` duration; the device latency stays outside the
+loop. (An earlier version also folded the measured sink latency into the error and
+compared it with `tlength` + `configured_sink_usec`. With interrupt-driven ALSA
+scheduling Pulse reports `configured_sink_usec = 0`, so the real 6-12 ms device
+latency looked like excess backlog: on the target NAS the rate sat at +1100 to
++1500 ppm and the client queue underran every 2-3 s.) `effective_target_us`
+still reports `tlength` plus `configured_sink_usec`.
 Before valid timing information arrives it uses the requested total budget.
 `effective_target_us`, `configured_sink_us` and `target_negotiated` expose that
 decision. No additional jitter duration is added to the negotiated total.

@@ -46,7 +46,7 @@ struct app {
     uint32_t next_sequence, highest_sequence; bool sequence_valid, ready, active, pumping;
     enum phase phase; size_t queued, previous_size;
     uint64_t last_valid, last_nonzero, started, gap_since, last_report, last_adjust;
-    double backlog_ewma, target_backlog, integral, ppm; unsigned playback_rate;
+    double backlog_ewma, target_backlog, client_target, integral, ppm; unsigned playback_rate;
     pa_usec_t latency; int latency_negative; double gain;
     int64_t phone, held_phone; bool phone_pending, ending, syncing, sync_active, sync_mix, managed, managed_ready;
     unsigned revision, synced_revision, sync_revision, sync_stage;
@@ -78,6 +78,13 @@ static void update_target(struct app *a) {
     a->target_backlog = a->target_negotiated
         ? attr->tlength * 1000000.0 / pa_bytes_per_second(spec) + a->configured_sink_usec
         : a->latency_ms * 1000.0;
+    /* The clock controller regulates only what this receiver controls: its own
+     * packet ring plus the server's client queue, against the negotiated tlength.
+     * The device latency is fixed by the sink; with interrupt-driven ALSA
+     * scheduling Pulse reports configured_sink_usec = 0, and folding the real
+     * 6-12 ms device latency into the error drove the queue empty (measured:
+     * +1500 ppm and an underrun every 2-3 s). */
+    a->client_target = attr && spec ? attr->tlength * 1000000.0 / pa_bytes_per_second(spec) : a->latency_ms * 1000.0;
 }
 static void status_json(struct app *a, char *out, size_t size, const char *event) {
     const pa_buffer_attr *attr = a->ready ? pa_stream_get_buffer_attr(a->stream) : NULL;
@@ -262,7 +269,7 @@ static void start_session(struct app *a, uint32_t sequence, uint64_t now) {
     clear_packets(a); a->next_sequence = sequence; a->highest_sequence = sequence;
     a->sequence_valid = true; a->active = true; a->ending = false; a->started = now; a->session_trace = 0;
     update_target(a);
-    a->backlog_ewma = a->target_backlog;
+    a->backlog_ewma = a->client_target;
     a->ppm = 0;
     set_rate(a, RATE);
     a->integral = 0; a->last_adjust = now; a->control_time = now;
@@ -474,10 +481,10 @@ static void timing_updated(pa_stream *stream, int success, void *userdata) {
     uint64_t now = mono_us();
     double dt = fmin(0.25, (now - a->control_time) / 1000000.0);
     a->control_time = now;
-    double backlog = a->queued * 1000000.0 / BYTE_RATE + total;
+    double backlog = a->queued * 1000000.0 / BYTE_RATE + fmax(0, buffered);
     a->backlog_ewma += (backlog - a->backlog_ewma) * (1 - exp(-dt));
     if (now - a->started <= 2000000 || now - a->last_valid > 10000) return;
-    double error_ms = (a->backlog_ewma - a->target_backlog) / 1000.0;
+    double error_ms = (a->backlog_ewma - a->client_target) / 1000.0;
     /* The two clocks' errors add: a measured null sink was +386 ppm while
      * its sender was -200 ppm. A +/-500 ppm actuator cannot close that loop.
      * Integral authority must also cover the drift without requiring the
