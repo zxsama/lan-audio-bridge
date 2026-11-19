@@ -79,6 +79,49 @@ function Get-DriverSwitchPlan {
     return ,@($plan)
 }
 
+# Reads the preferred endpoints and their identities from an existing sender.conf.
+function ConvertFrom-SenderConfig {
+    param([AllowEmptyCollection()][string[]]$Lines)
+    $entries = @()
+    for ($i = 0; $i -lt $Lines.Count - 1; $i++) {
+        $value = $Lines[$i + 1]
+        switch ($Lines[$i]) {
+            '--prefer' { $entries += [pscustomobject]@{ Id = $value; Parent = ''; Labels = @() } }
+            '--match' { if ($entries.Count) { $entries[-1].Parent = $value } }
+            '--label' { if ($entries.Count) { $entries[-1].Labels = @($entries[-1].Labels) + $value } }
+        }
+    }
+    return ,$entries
+}
+
+# Maps previous preferences to current endpoint IDs. An entry whose ID is still
+# active keeps it; otherwise a matching description (one of its labels) is
+# required and the same parent device breaks ties. Ambiguous or missing matches
+# are dropped instead of guessed. Same rule as vban-sender's rebinding.
+function Resolve-SenderPreference {
+    param([AllowEmptyCollection()][object[]]$Entries, [AllowEmptyCollection()][string[]]$Active,
+          [hashtable]$Parents = @{}, [hashtable]$Descriptions = @{})
+    $result = @()
+    foreach ($entry in $Entries) {
+        $taken = @($result | ForEach-Object Id)
+        if ($Active -contains $entry.Id -and $taken -notcontains $entry.Id) {
+            $result += [pscustomobject]@{ Id = $entry.Id; Previous = $entry.Id; Entry = $entry }; continue
+        }
+        $scored = foreach ($id in $Active) {
+            if ($taken -contains $id) { continue }
+            $desc = if ($Descriptions.ContainsKey($id)) { [string]$Descriptions[$id] } else { '' }
+            if (-not $desc -or @($entry.Labels) -notcontains $desc) { continue }
+            $parent = if ($Parents.ContainsKey($id)) { [string]$Parents[$id] } else { '' }
+            [pscustomobject]@{ Id = $id; Score = 1 + $(if ($entry.Parent -and $parent -eq $entry.Parent) { 2 } else { 0 }) }
+        }
+        $scored = @($scored | Sort-Object Score -Descending)
+        if ($scored.Count -and ($scored.Count -eq 1 -or $scored[0].Score -gt $scored[1].Score)) {
+            $result += [pscustomobject]@{ Id = $scored[0].Id; Previous = $entry.Id; Entry = $entry }
+        }
+    }
+    return ,$result
+}
+
 function Assert-SenderEndpointId {
     param([string]$Id)
     if (-not $Id -or $Id.Length -ge 256 -or $Id -match '[\r\n\x00]') { throw 'Invalid playback endpoint ID.' }
@@ -86,7 +129,7 @@ function Assert-SenderEndpointId {
 
 function New-SenderConfigLines {
     param([string]$Address, [int]$Port = 6980, [string]$StreamName = 'Windows',
-          [AllowEmptyCollection()][string[]]$Prefer = @(), [string]$LogPath)
+          [AllowEmptyCollection()][string[]]$Prefer = @(), [string]$LogPath, [hashtable]$Identity = @{})
     $ip = $null
     if (-not [Net.IPAddress]::TryParse($Address, [ref]$ip) -or $ip.AddressFamily -ne 'InterNetwork' -or $Address -ne $ip.ToString()) {
         throw 'Address must be the NAS IPv4 address, for example 192.168.1.20.'
@@ -97,7 +140,18 @@ function New-SenderConfigLines {
     if ($Prefer.Count -gt 8) { throw 'At most 8 preferred endpoints are supported.' }
     # --idle-ms 0: keep sending silence so the NAS output stays connected and awake.
     $lines = @('--target', $Address, '--port', [string]$Port, '--stream', $StreamName, '--stats-ms', '60000', '--idle-ms', '0')
-    foreach ($id in $Prefer) { Assert-SenderEndpointId $id; $lines += @('--prefer', $id) }
+    foreach ($id in $Prefer) {
+        Assert-SenderEndpointId $id
+        $lines += @('--prefer', $id)
+        # Identity lets the sender find the endpoint again if Windows gives it a new ID.
+        if ($Identity.ContainsKey($id)) {
+            $parent = [string]$Identity[$id].Parent
+            if ($parent -and $parent -notmatch '[\r\n]') { $lines += @('--match', $parent) }
+            foreach ($label in @($Identity[$id].Labels | Where-Object { $_ } | Select-Object -Unique | Select-Object -First 3)) {
+                if ($label -notmatch '[\r\n]') { $lines += @('--label', [string]$label) }
+            }
+        }
+    }
     if ($LogPath) {
         if ($LogPath -match '[\r\n]') { throw 'Invalid log path.' }
         $lines += @('--log', $LogPath)
@@ -117,5 +171,6 @@ function New-SenderRunCommand {
 }
 
 Export-ModuleMember -Function ConvertFrom-SenderEndpointList, Select-SenderEndpoints, Select-SenderPreference,
+    ConvertFrom-SenderConfig, Resolve-SenderPreference,
     Test-DisplayAudioDevice, Get-DriverSwitchPlan, Assert-SenderEndpointId,
     New-SenderConfigLines, New-SenderRunCommand

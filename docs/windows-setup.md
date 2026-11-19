@@ -17,7 +17,7 @@ PowerShell 中可传参数，例如 `./scripts/windows-audio.ps1 -Address 192.16
 2. **选择输出**：按最小引擎周期选取主输出，排除 Voicemeeter、虚拟声卡和蓝牙。主输出是显示器音频时（显示器休眠会消失），备用输出取一个常在的非显示器设备。重复运行时沿用上次的选择，也可用 `-Prefer` 指定。
 3. **清晰命名**：把主、备用输出的设备描述改为“NAS 音频”和“NAS 音频（备用）”，原名称记录在案。
 4. **停用旧方案**：关闭正在运行的 Voicemeeter 的 VBAN 输出并结束其进程，移除旧版 Voicemeeter 配置脚本的登录启动项和 `%LOCALAPPDATA%\LanAudioBridge\WindowsAudio`，隐藏 Voicemeeter 的播放和录音端点。默认麦克风若是 Voicemeeter（停止后只会录到静音），改为第一个非蓝牙的真实麦克风。Voicemeeter 本身不会被卸载，不再需要时可在“应用”中卸载。
-5. **发送端**：复制 `vban-sender.exe` 到 `%LOCALAPPDATA%\LanAudioBridge\Sender\`，写入 `sender.conf`，添加 `LanAudioBridgeSender` 登录启动项，立即在后台启动并确认采集已开始。
+5. **发送端**：复制 `vban-sender.exe` 到 `%LOCALAPPDATA%\LanAudioBridge\Sender\`，写入 `sender.conf`，注册当前用户的登录计划任务 `\LanAudioBridge\Sender`（登录时启动，异常退出后每分钟重试），另保留 `LanAudioBridgeSender` 登录启动项作后备（两者同时启动时第二个直接退出），随后立即在后台启动并确认采集已开始。
 
 首次运行时备份默认播放设备、启动项与 Voicemeeter 的 VBAN 开关到 `original.json`；之后的每项改动（驱动、名称、隐藏的端点）都追加记录。`Restore` 按记录恢复：先改回名称，再装回原厂驱动，显示被隐藏的端点，恢复仍存在的默认设备，重新启动原先运行的 Voicemeeter，并删除发送端文件。中途失败时保留记录，可再次运行 `Restore`；配置中途失败时会用上一份配置重新启动发送端。
 
@@ -29,6 +29,7 @@ PowerShell 中可传参数，例如 `./scripts/windows-audio.ps1 -Address 192.16
 - **音量**：loopback 位于软件端点音量/静音之后、硬件音量/静音之前；发送端按 `QueryHardwareSupport` 只补上硬件实现的部分，Windows 音量和静音在各类设备上表现一致。
 - **保持连接**：配置写入 `--idle-ms 0`，选择 NAS 输出期间持续发送（含静音），NAS 配合 `DESKTOP_KEEP_AWAKE` 让 DAC 一直保持唤醒，播放前不再有唤醒噪声；关机或切到其他输出后停止发送，NAS 在 `OUTPUT_IDLE_SUSPEND_MS` 后让 DAC 休眠。约 1.6 Mbit/s。
 - **音量一致**：“NAS 音频”与“NAS 音频（备用）”共用一个音量和静音状态。调节其中任一个（音量滑块或静音），另一个立即跟随；备用设备重新出现时（如显示器唤醒）按最近的共同音量对齐。可用 `--no-volume-sync` 关闭。
+- **端点被重建**：Windows 更新或驱动重装后，同一设备可能换成新的端点 ID，“NAS 音频”名称也可能丢失。`sender.conf` 为每个首选端点记录父设备（`--match`）和可接受的名称（`--label`：原名称与“NAS 音频”名称）；ID 失效时，发送端按名称（必须匹配）和父设备（用于区分）重新绑定，日志记为 `prefer_rebound`，有歧义时不猜测。重新运行配置时使用同样的规则，并恢复名称。
 - **仅 NAS 输出**：默认输出不是“NAS 音频”时（例如切到耳机），发送端待机，不采集也不发送。
 - **设备变化**：跟随默认播放设备，设备失效时自动重开。首选端点重新出现时切回；默认设备消失后 Windows 改选了非首选设备时，换成下一个首选端点；首选设备仍在时用户手动选择的其他设备会被保留。
 - **优先级**：采集线程注册 MMCSS “Pro Audio”。
@@ -64,3 +65,18 @@ VAIO 的 loopback 位于其内部缓冲之后（实测滞后 61–104 ms），�
 - 设备描述保存在 Windows 端点属性中；更换驱动或重装声卡后端点会变化，重新运行配置即可。
 - 仅支持 48 kHz；混音格式不同时由 Windows 转换。VBAN 不加密、不认证，只在可信局域网使用。
 - 其他 VBAN 发送端（例如 Voicemeeter）仍可手动使用，格式要求见[电脑音频说明](desktop-audio.md)；同一源地址和流名同时只能有一路。
+
+## 故障排查与备用方案
+
+`Setup-Windows-Audio.cmd Status` 显示发送端是否运行、计划任务状态、默认输出、默认麦克风；日志在 `%LOCALAPPDATA%\LanAudioBridge\Sender\sender.log`。
+
+| 现象 | 处理 |
+| --- | --- |
+| 开机后 NAS 没有声音，默认输出变成其他设备 | 先运行 `Setup-Windows-Audio.cmd`（重复运行安全：会找回被重建的端点、恢复名称和默认输出并重启发送端）。只需临时恢复时，在 Windows 声音设置中选择“NAS 音频”，再运行 `Setup-Windows-Audio.cmd Start`。 |
+| 发送端没有运行 | `Setup-Windows-Audio.cmd Start`；或在任务计划程序中运行 `\LanAudioBridge\Sender`。 |
+| 日志出现 `standby` | 默认输出不是 NAS 输出。选择“NAS 音频”即可恢复发送。 |
+| “NAS 音频”名称变回设备原名 | 端点被 Windows 重建过；发送端仍会按身份找到它。重新运行配置可恢复名称（需要一次管理员确认）。 |
+| Windows 更新装回了厂商驱动 | 仍可使用，但引擎周期回到 10 ms，Windows 侧延迟约 20–30 ms。重新运行配置会再次提示切换到 Microsoft 驱动；也可在组策略中启用“Windows 更新不包括驱动程序”。 |
+| 显示器休眠或 HDMI 断开 | 自动切换到“NAS 音频（备用）”，显示器恢复后切回；两者音量同步。 |
+| 需要回到配置前的状态 | `Setup-Windows-Audio.cmd Restore`：删除计划任务和启动项，恢复驱动、名称和默认设备。 |
+| 原生发送端不可用 | 任何符合格式的 VBAN 发送端都可替代（例如重新安装 Voicemeeter，按[电脑音频说明](desktop-audio.md)配置），Windows 侧延迟约 45 ms 以上。手机投放（AirPlay、DLNA、Spotify、MiPlay）不依赖 Windows。 |

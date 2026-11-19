@@ -32,6 +32,8 @@ $statePath = Join-Path $stateRoot 'original.json'
 $legacyRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'LanAudioBridge\WindowsAudio'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $senderRunName = 'LanAudioBridgeSender'
+$taskPath = '\LanAudioBridge\'
+$taskName = 'Sender'
 $legacyRunName = 'LanAudioBridgeAudio'   # former Voicemeeter-based setup
 # Default names (Chinese "NAS audio" / "(backup)") are built from code points so this file stays ASCII.
 $defaultName = 'NAS ' + [string][char]0x97F3 + [char]0x9891
@@ -82,6 +84,21 @@ function Invoke-SenderTool([string[]]$Arguments) {
         return [pscustomobject]@{ ExitCode = $process.ExitCode; Lines = @($text -split "`r?`n" | Where-Object { $_ }) }
     } finally { Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue }
 }
+
+# Logon task: started reliably at sign-in (Windows can skip HKCU Run entries,
+# e.g. right after an update) and restarted if the sender ever exits abnormally.
+function Register-SenderTask {
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $action = New-ScheduledTaskAction -Execute $exe -Argument ('--config "' + $configPath + '"')
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskPath $taskPath -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings `
+        -Principal $principal -Description 'LAN Audio Bridge: send Windows audio to the NAS' -Force | Out-Null
+}
+
+function Get-SenderTask { Get-ScheduledTask -TaskPath $taskPath -TaskName $taskName -ErrorAction SilentlyContinue }
 
 function Get-SenderProcess {
     @(Get-Process -Name 'vban-sender' -ErrorAction SilentlyContinue | Where-Object {
@@ -278,10 +295,31 @@ function Invoke-Setup {
     # 2. Capture preference: explicit > previous configuration > automatic.
     $found = Get-Endpoints
     $active = @($found.List | ForEach-Object id)
+    $descriptions = @{}
+    foreach ($id in $active) { $descriptions[$id] = $endpoints::GetDescription($id) }
     $Prefer = @($Prefer | Where-Object { $_ } | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $rebound = @()
     if (-not $Prefer.Count -and (Test-Path -LiteralPath $configPath)) {
-        $lines = @(Get-Content -LiteralPath $configPath)
-        $Prefer = @(for ($i = 0; $i -lt $lines.Count - 1; $i++) { if ($lines[$i] -eq '--prefer' -and $active -contains $lines[$i + 1]) { $lines[$i + 1] } })
+        # Windows may re-create endpoints with new IDs (updates, driver reinstall); follow them by identity.
+        $previous = ConvertFrom-SenderConfig @(Get-Content -LiteralPath $configPath)
+        # Configurations written before identities existed: use the recorded original
+        # description and the NAS label of that position.
+        for ($k = 0; $k -lt $previous.Count; $k++) {
+            if (@($previous[$k].Labels).Count) { continue }
+            $recorded = @($state.Descriptions | Where-Object Id -eq $previous[$k].Id) | Select-Object -First 1
+            $previous[$k].Labels = @(@($(if ($recorded) { $recorded.Original }), $(if ($k -eq 0) { $Name } else { $Name + $backupSuffix })) | Where-Object { $_ })
+        }
+        $rebound = Resolve-SenderPreference $previous $active $found.Parents $descriptions
+        $Prefer = @($rebound | ForEach-Object Id)
+        foreach ($r in $rebound) {
+            if ($r.Previous -eq $r.Id) { continue }
+            Write-Output ('Windows re-created a NAS output; following it: ' + $descriptions[$r.Id])
+            $old = @($state.Descriptions | Where-Object Id -eq $r.Previous) | Select-Object -First 1
+            $state.Descriptions = @($state.Descriptions | Where-Object Id -ne $r.Previous)
+            if ($old -and -not @($state.Descriptions | Where-Object Id -eq $r.Id).Count) {
+                $state.Descriptions = @($state.Descriptions) + [pscustomobject]@{ Id = $r.Id; Original = $old.Original }
+            }
+        }
     }
     if (-not $Prefer.Count) { $Prefer = Select-SenderPreference $found.List $found.Parents }
     if (-not $Prefer.Count) { throw 'No suitable playback device was found. Connect a wired output or pass -Prefer.' }
@@ -343,9 +381,18 @@ function Invoke-Setup {
     Write-State $state
 
     # 5. Sender configuration, autostart and start.
-    $lines = New-SenderConfigLines $Address $Port $StreamName $Prefer $logPath
+    $identity = @{}
+    foreach ($id in $Prefer) {
+        $original = (@($state.Descriptions | Where-Object Id -eq $id) | Select-Object -First 1)
+        $labels = @($(if ($original) { $original.Original } else { $descriptions[$id] }), $wanted[$id])
+        $previousEntry = (@($rebound | Where-Object Id -eq $id) | Select-Object -First 1)
+        if ($previousEntry) { $labels += @($previousEntry.Entry.Labels) }
+        $identity[$id] = @{ Parent = $found.Parents[$id]; Labels = @($labels | Where-Object { $_ } | Select-Object -Unique) }
+    }
+    $lines = New-SenderConfigLines $Address $Port $StreamName $Prefer $logPath $identity
     [IO.File]::WriteAllLines($configPath, [string[]]$lines, (New-Object Text.UTF8Encoding $false))
     Set-RunValue $senderRunName ([pscustomobject]@{ Exists = $true; Value = (New-SenderRunCommand $exe $configPath) })
+    try { Register-SenderTask } catch { Write-Warning ('Logon task not registered; the Run entry remains the only autostart: ' + $_.Exception.Message) }
     $capture = Start-Sender
     Start-Sleep -Milliseconds 800
     $names = @($Prefer | ForEach-Object { $id = $_; ($endpoints::ListRender() | Where-Object Id -eq $id | Select-Object -First 1).Name })
@@ -358,6 +405,7 @@ function Invoke-Restore {
     if (-not $state) { Write-Output 'Nothing to restore.'; return }
     Stop-Sender
     Set-RunValue $senderRunName $state.SenderRun
+    if (Get-SenderTask) { Unregister-ScheduledTask -TaskPath $taskPath -TaskName $taskName -Confirm:$false }
     foreach ($id in @($state.Hidden)) { try { $endpoints::SetVisibility($id, $true) } catch { Write-Warning "Could not show endpoint ${id}: $($_.Exception.Message)" } }
     $present = @($endpoints::ListRender() | ForEach-Object Id)
     $plan = [pscustomobject]@{
@@ -403,6 +451,8 @@ switch ($Action) {
         Write-Output ('Sender running: ' + [bool]$running.Count)
         if (Test-Path -LiteralPath $configPath) { Write-Output ('Configuration: ' + ((Get-Content -LiteralPath $configPath) -join ' ')) }
         Write-Output ('Startup entry: ' + (Get-RunValue $senderRunName).Exists)
+        $task = Get-SenderTask
+        Write-Output ('Logon task: ' + $(if ($task) { $task.State } else { 'missing' }))
         $default = $endpoints::GetDefault(0)
         Write-Output ('Default output: ' + ($endpoints::ListRender() | Where-Object Id -eq $default | Select-Object -First 1).Name)
         $state = Read-State

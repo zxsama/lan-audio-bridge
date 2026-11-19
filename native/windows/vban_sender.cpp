@@ -59,6 +59,12 @@ struct Options {
     static constexpr unsigned kMaxPrefer = 8;
     wchar_t prefer[kMaxPrefer][256] = {};
     unsigned prefer_count = 0;
+    // Identity used to find a preferred endpoint again after Windows re-creates
+    // it with a new ID (driver reinstall, feature update, device re-enumeration).
+    static constexpr unsigned kMaxLabels = 3;
+    wchar_t prefer_parent[kMaxPrefer][512] = {};             // --match: parent device instance
+    wchar_t prefer_label[kMaxPrefer][kMaxLabels][128] = {};  // --label: accepted device descriptions
+    unsigned prefer_labels[kMaxPrefer] = {};
 };
 
 struct Stats {
@@ -72,9 +78,19 @@ std::atomic<bool> g_mute{false};
 std::atomic<DWORD> g_hardware{0};  // ENDPOINT_HARDWARE_SUPPORT_* of the captured endpoint
 HANDLE g_stop = nullptr, g_reopen = nullptr, g_policy = nullptr;
 HANDLE g_volume_devices = nullptr, g_volume_changed = nullptr;  // volume sync wake-ups
+SRWLOCK g_prefer_lock = SRWLOCK_INIT;  // guards g_opt.prefer[] (rebinding rewrites IDs)
+
 HANDLE g_log = INVALID_HANDLE_VALUE;
 SRWLOCK g_log_lock = SRWLOCK_INIT;
 Options g_opt;
+// Copies the preferred endpoint IDs for use outside the policy thread.
+unsigned copy_preferences(wchar_t (*out)[256]) {
+    AcquireSRWLockShared(&g_prefer_lock);
+    unsigned n = g_opt.prefer_count;
+    for (unsigned i = 0; i < n; i++) wcsncpy_s(&out[i][0], 256, g_opt.prefer[i], _TRUNCATE);
+    ReleaseSRWLockShared(&g_prefer_lock);
+    return n;
+}
 
 void log(const char *fmt, ...) {
     char buffer[2048];
@@ -152,6 +168,71 @@ public:
     HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
 };
 
+// Reads one string property from an endpoint's property store.
+bool endpoint_string(IMMDevice *device, const PROPERTYKEY &key, wchar_t *out, size_t size) {
+    out[0] = 0;
+    IPropertyStore *props = nullptr;
+    if (FAILED(device->OpenPropertyStore(STGM_READ, &props))) return false;
+    PROPVARIANT v; PropVariantInit(&v);
+    bool ok = SUCCEEDED(props->GetValue(key, &v)) && v.vt == VT_LPWSTR && v.pwszVal;
+    if (ok) wcsncpy_s(out, size, v.pwszVal, _TRUNCATE);
+    PropVariantClear(&v); props->Release();
+    return ok;
+}
+const PROPERTYKEY kDeviceDescription = {{0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 2};
+const PROPERTYKEY kParentDevice = {{0xb3f8fa53, 0x0004, 0x438e, {0x90, 0x03, 0x51, 0xa4, 0x6e, 0x13, 0x9b, 0xfc}}, 2};
+
+// For each preferred entry whose ID is no longer active, find the active render
+// endpoint with the same identity: a matching description (original or the
+// NAS label) is required; the same parent device breaks ties. Ambiguous matches
+// are skipped rather than guessed. Called from the policy thread only.
+void rebind_preferences(IMMDeviceEnumerator *enumerator) {
+    IMMDeviceCollection *all = nullptr; UINT count = 0;
+    if (FAILED(enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &all))) return;
+    all->GetCount(&count);
+    struct Candidate { wchar_t id[256]; wchar_t parent[512]; wchar_t desc[128]; };
+    static Candidate candidates[64];
+    unsigned n = 0;
+    for (UINT i = 0; i < count && n < 64; i++) {
+        IMMDevice *d = nullptr; LPWSTR id = nullptr;
+        if (SUCCEEDED(all->Item(i, &d)) && SUCCEEDED(d->GetId(&id))) {
+            wcsncpy_s(candidates[n].id, id, _TRUNCATE);
+            endpoint_string(d, kParentDevice, candidates[n].parent, 512);
+            endpoint_string(d, kDeviceDescription, candidates[n].desc, 128);
+            n++;
+        }
+        if (id) CoTaskMemFree(id);
+        release(d);
+    }
+    all->Release();
+    AcquireSRWLockExclusive(&g_prefer_lock);
+    for (unsigned p = 0; p < g_opt.prefer_count; p++) {
+        bool present = false;
+        for (unsigned c = 0; c < n && !present; c++) present = !_wcsicmp(candidates[c].id, g_opt.prefer[p]);
+        if (present || !g_opt.prefer_labels[p]) continue;
+        int best = -1, best_score = 0, ties = 0;
+        for (unsigned c = 0; c < n; c++) {
+            bool taken = false;
+            for (unsigned q = 0; q < g_opt.prefer_count; q++) taken = taken || (q != p && !_wcsicmp(candidates[c].id, g_opt.prefer[q]));
+            bool label = false;
+            for (unsigned l = 0; l < g_opt.prefer_labels[p]; l++) label = label || !_wcsicmp(candidates[c].desc, g_opt.prefer_label[p][l]);
+            if (taken || !label) continue;
+            int score = 1 + (g_opt.prefer_parent[p][0] && !_wcsicmp(candidates[c].parent, g_opt.prefer_parent[p]) ? 2 : 0);
+            if (score > best_score) { best = (int)c; best_score = score; ties = 0; }
+            else if (score == best_score) ties++;
+        }
+        if (best >= 0 && !ties) {
+            char from[600], to[600], desc[300];
+            json_text(g_opt.prefer[p], from, sizeof(from)); json_text(candidates[best].id, to, sizeof(to));
+            json_text(candidates[best].desc, desc, sizeof(desc));
+            log("{\"event\":\"prefer_rebound\",\"index\":%u,\"from\":\"%s\",\"to\":\"%s\",\"description\":\"%s\",\"same_parent\":%s}\n",
+                p, from, to, desc, best_score >= 3 ? "true" : "false");
+            wcsncpy_s(g_opt.prefer[p], candidates[best].id, _TRUNCATE);
+        }
+    }
+    ReleaseSRWLockExclusive(&g_prefer_lock);
+}
+
 // Keeps the Windows default render endpoint on the best available preferred
 // device: moves to a higher-ranked preferred endpoint when it (re)appears, and
 // replaces a fallback Windows chose after the previous default disappeared.
@@ -172,6 +253,7 @@ DWORD WINAPI policy_thread(LPVOID) {
             if (WaitForSingleObject(g_stop, 400) == WAIT_OBJECT_0) break;
             ResetEvent(g_policy);
         }
+        rebind_preferences(enumerator);
         auto active = [&](const wchar_t *id) {
             IMMDevice *d = nullptr; DWORD state = 0;
             bool ok = SUCCEEDED(enumerator->GetDevice(id, &d)) && SUCCEEDED(d->GetState(&state)) && state == DEVICE_STATE_ACTIVE;
@@ -261,9 +343,11 @@ DWORD WINAPI volume_sync_thread(LPVOID) {
     };
     auto open_all = [&] {
         close_all();
+        static wchar_t ids[Options::kMaxPrefer][256];
+        copy_preferences(ids);
         for (unsigned i = 0; i < g_opt.prefer_count; i++) {
             IMMDevice *d = nullptr; DWORD state = 0;
-            if (SUCCEEDED(enumerator->GetDevice(g_opt.prefer[i], &d)) && SUCCEEDED(d->GetState(&state)) && state == DEVICE_STATE_ACTIVE &&
+            if (SUCCEEDED(enumerator->GetDevice(ids[i], &d)) && SUCCEEDED(d->GetState(&state)) && state == DEVICE_STATE_ACTIVE &&
                 SUCCEEDED(d->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, (void **)&volume[i]))) {
                 events[i] = new SyncEvents((int)i);
                 volume[i]->RegisterControlChangeNotify(events[i]);
@@ -293,7 +377,9 @@ DWORD WINAPI volume_sync_thread(LPVOID) {
         int leader = -1;
         IMMDevice *d = nullptr; LPWSTR id = nullptr;
         if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &d)) && SUCCEEDED(d->GetId(&id))) {
-            for (unsigned i = 0; i < g_opt.prefer_count; i++) if (volume[i] && !_wcsicmp(id, g_opt.prefer[i])) leader = (int)i;
+            static wchar_t ids[Options::kMaxPrefer][256];
+            copy_preferences(ids);
+            for (unsigned i = 0; i < g_opt.prefer_count; i++) if (volume[i] && !_wcsicmp(id, ids[i])) leader = (int)i;
             CoTaskMemFree(id);
         }
         release(d);
@@ -492,7 +578,9 @@ HRESULT run_session(IMMDeviceEnumerator *enumerator, Sender &sender) {
     describe(device, name, 256); device->GetId(&id);
     if (g_opt.prefer_count && id) {
         bool preferred = false;
-        for (unsigned i = 0; i < g_opt.prefer_count; i++) preferred = preferred || !_wcsicmp(id, g_opt.prefer[i]);
+        static wchar_t ids[Options::kMaxPrefer][256];
+        unsigned n = copy_preferences(ids);
+        for (unsigned i = 0; i < n; i++) preferred = preferred || !_wcsicmp(id, ids[i]);
         if (!preferred) {
             // The user chose another output (e.g. headphones): send nothing, so the
             // NAS idles normally, and leave that device's engine period alone.
@@ -623,7 +711,7 @@ bool parse_unsigned(const wchar_t *s, unsigned low, unsigned high, unsigned &out
 
 int usage() {
     log("usage: vban-sender --target IPv4 [--port 6980] [--stream Windows] [--device ENDPOINT_ID]\n"
-        "                   [--prefer ENDPOINT_ID ...] [--frames 128] [--idle-ms 2000]\n"
+        "                   [--prefer ENDPOINT_ID [--match PARENT] [--label DESC ...] ...] [--frames 128] [--idle-ms 2000]\n"
         "                   [--no-endpoint-volume] [--no-keeper] [--no-volume-sync] [--stats-ms 0] [--log FILE] | --config FILE | --list | --stop\n");
     return 2;
 }
@@ -726,6 +814,15 @@ int wmain(int argc, wchar_t **argv) {
         }
         else if (!wcscmp(a, L"--stats-ms")) { if (!parse_unsigned(v, 100, 3600000, g_opt.stats_ms)) return usage(); }
         else if (!wcscmp(a, L"--device")) { if (wcslen(v) >= 512) return usage(); wcscpy_s(g_opt.device, v); }
+        else if (!wcscmp(a, L"--match")) {
+            if (!g_opt.prefer_count || wcslen(v) >= 512) return usage();
+            wcscpy_s(g_opt.prefer_parent[g_opt.prefer_count - 1], v);
+        }
+        else if (!wcscmp(a, L"--label")) {
+            unsigned p = g_opt.prefer_count - 1;
+            if (!g_opt.prefer_count || g_opt.prefer_labels[p] >= Options::kMaxLabels || wcslen(v) >= 128 || !*v) return usage();
+            wcscpy_s(g_opt.prefer_label[p][g_opt.prefer_labels[p]++], v);
+        }
         else if (!wcscmp(a, L"--prefer")) {
             if (g_opt.prefer_count >= Options::kMaxPrefer || wcslen(v) >= 256 || !*v) return usage();
             wcscpy_s(g_opt.prefer[g_opt.prefer_count++], v);
@@ -752,7 +849,8 @@ int wmain(int argc, wchar_t **argv) {
     if (g_opt.log_path[0] && !open_log(g_opt.log_path)) return 5;
 
     HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\LanAudioBridgeVbanSender");
-    if (!single || GetLastError() == ERROR_ALREADY_EXISTS) { log("{\"event\":\"error\",\"error\":\"already_running\"}\n"); return 3; }
+    // Logon task and Run entry may both start the sender; the second one simply yields.
+    if (!single || GetLastError() == ERROR_ALREADY_EXISTS) { log("{\"event\":\"already_running\"}\n"); return 0; }
     WSADATA wsa; if (WSAStartup(MAKEWORD(2, 2), &wsa)) return 1;
     static Sender sender;
     if (!sender.open(g_opt)) { log("{\"event\":\"error\",\"error\":\"socket\",\"wsa\":%d}\n", WSAGetLastError()); return 2; }

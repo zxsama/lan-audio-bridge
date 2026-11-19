@@ -78,6 +78,24 @@ Assert-True ($plan[0].InboxInf -eq 'hdaudio.inf' -and $plan[0].OriginalInf -eq '
 Assert-True ($plan[1].InboxInf -eq 'usbaudio2.inf' -and $plan[1].OriginalInf -eq 'oem45.inf') 'USB Audio 2.0 uses usbaudio2.inf'
 Assert-True ((Get-DriverSwitchPlan @()).Count -eq 0) 'Empty device list'
 
+$conf = @('--target', '10.0.0.2', '--prefer', 'old-hdmi', '--match', '{1}.HDAUDIO\FUNC_01&VEN_10DE\5&1', '--label', 'DELL U2722DX', '--label', 'NAS audio',
+          '--prefer', 'old-usb', '--label', 'SPDIF', '--label', 'NAS audio (backup)', '--log', 'x.log')
+$entries = ConvertFrom-SenderConfig $conf
+Assert-True ($entries.Count -eq 2 -and $entries[0].Parent -like '*VEN_10DE*' -and $entries[0].Labels.Count -eq 2 -and $entries[1].Labels[1] -eq 'NAS audio (backup)') 'Config identities parse'
+$parentsNow = @{ 'new-dell' = '{1}.HDAUDIO\FUNC_01&VEN_10DE\5&1'; 'new-phl' = '{1}.HDAUDIO\FUNC_01&VEN_10DE\5&1'; 'new-usb' = '{1}.USB\VID_0DB0\9&2' }
+$descNow = @{ 'new-dell' = 'DELL U2722DX'; 'new-phl' = 'PHL 275M1RZ'; 'new-usb' = 'NAS audio (backup)' }
+$resolved = Resolve-SenderPreference $entries @('new-phl', 'new-dell', 'new-usb') $parentsNow $descNow
+Assert-True ((($resolved | ForEach-Object Id) -join ',') -eq 'new-dell,new-usb') 'Re-created endpoints are found by description, not by enumeration order'
+Assert-True ($resolved[0].Previous -eq 'old-hdmi' -and $resolved[1].Previous -eq 'old-usb') 'Previous IDs are reported for state migration'
+$kept = Resolve-SenderPreference $entries @('old-hdmi', 'new-usb') $parentsNow $descNow
+Assert-True ($kept[0].Id -eq 'old-hdmi' -and $kept[0].Previous -eq 'old-hdmi') 'An ID that still exists is kept'
+$ambiguous = Resolve-SenderPreference @([pscustomobject]@{ Id = 'gone'; Parent = ''; Labels = @('Speakers') }) @('a', 'b') @{} @{ a = 'Speakers'; b = 'Speakers' }
+Assert-True ($ambiguous.Count -eq 0) 'Ambiguous matches are not guessed'
+$tie = Resolve-SenderPreference @([pscustomobject]@{ Id = 'gone'; Parent = 'P1'; Labels = @('Speakers') }) @('a', 'b') @{ a = 'P2'; b = 'P1' } @{ a = 'Speakers'; b = 'Speakers' }
+Assert-True ($tie.Count -eq 1 -and $tie[0].Id -eq 'b') 'Same parent device breaks a description tie'
+$withIdentity = New-SenderConfigLines '10.0.0.2' 6980 'Windows' @('e1') $null @{ e1 = @{ Parent = 'PARENT'; Labels = @('A', 'B', 'A', 'C', 'D') } }
+Assert-True (($withIdentity -join '|') -like '*--prefer|e1|--match|PARENT|--label|A|--label|B|--label|C') 'Identity lines follow their endpoint; labels are unique and capped at 3'
+
 $tokens = $null; $errors = $null
 $null = [Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts\windows-audio.ps1'), [ref]$tokens, [ref]$errors)
 Assert-True (-not $errors.Count) ('Setup script parses: ' + ($errors -join '; '))
