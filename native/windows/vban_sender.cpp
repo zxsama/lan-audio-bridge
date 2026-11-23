@@ -44,6 +44,7 @@ constexpr const wchar_t *kStopEventName = L"Local\\LanAudioBridgeVbanSenderStop"
 
 struct Options {
     wchar_t target[64] = L"";
+    wchar_t source[64] = L"";   // optional local IPv4 to send from (the address the NAS accepts)
     unsigned port = 6980;
     char stream[17] = "Windows";
     wchar_t device[512] = L"";  // empty = follow default console render endpoint
@@ -68,6 +69,8 @@ struct Options {
 };
 
 struct Stats {
+    uint64_t socket_resets = 0;
+    int last_send_error = 0;
     uint64_t capture_packets = 0, frames = 0, datagrams = 0, send_errors = 0, discontinuities = 0,
              silent_packets = 0, suppressed = 0, reopen = 0, clipped = 0;
     double max_gap_ms = 0;
@@ -448,22 +451,46 @@ struct Sender {
     bool sending = true;
     Stats stats;
 
-    bool open(const Options &o) {
+    unsigned consecutive_errors = 0;
+    double last_reset = -1e18;
+    // Creates and connects the UDP socket. Returns 0 or the WSA error. A connected
+    // socket keeps the route/source chosen at connect time, which goes stale when
+    // the network adapter restarts (sleep/resume), so it is recreated on errors.
+    int open(const Options &o) {
+        if (sock != INVALID_SOCKET) { closesocket(sock); sock = INVALID_SOCKET; }
         sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (sock == INVALID_SOCKET) return false;
+        if (sock == INVALID_SOCKET) return WSAGetLastError();
         sockaddr_in to{}; to.sin_family = AF_INET; to.sin_port = htons((u_short)o.port);
-        if (InetPtonW(AF_INET, o.target, &to.sin_addr) != 1) return false;
+        if (InetPtonW(AF_INET, o.target, &to.sin_addr) != 1) return WSAEINVAL;
         int tos = 0xb8;  // DSCP EF; honoured only where QoS policy allows it.
         setsockopt(sock, IPPROTO_IP, IP_TOS, (const char *)&tos, sizeof(tos));
         int size = 1 << 16; setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (const char *)&size, sizeof(size));
-        if (connect(sock, (sockaddr *)&to, sizeof(to)) != 0) return false;
+        if (o.source[0]) {
+            // Pin the source address: with two adapters in one subnet Windows could
+            // otherwise pick the other one, whose packets the NAS rejects.
+            sockaddr_in from{}; from.sin_family = AF_INET;
+            if (InetPtonW(AF_INET, o.source, &from.sin_addr) != 1) return WSAEINVAL;
+            if (bind(sock, (sockaddr *)&from, sizeof(from)) != 0) { int e = WSAGetLastError(); closesocket(sock); sock = INVALID_SOCKET; return e; }
+        }
+        if (connect(sock, (sockaddr *)&to, sizeof(to)) != 0) { int e = WSAGetLastError(); closesocket(sock); sock = INVALID_SOCKET; return e; }
+        consecutive_errors = 0;
         memset(packet, 0, 28);
         memcpy(packet, "VBAN", 4);
         packet[4] = 3;  // audio sub-protocol, 48000 Hz index
         packet[6] = kChannels - 1;
         packet[7] = 1;  // PCM, INT16
         memcpy(packet + 8, o.stream, strlen(o.stream));
-        return true;
+        return 0;
+    }
+    // Recreate the socket after ~0.3 s of consecutive send failures (at most every 2 s).
+    void send_failed(double now) {
+        stats.send_errors++;
+        stats.last_send_error = WSAGetLastError();
+        if (++consecutive_errors < 100 || now - last_reset < 2000) return;
+        last_reset = now;
+        int e = open(g_opt);
+        stats.socket_resets++;
+        log("{\"event\":\"socket_reset\",\"send_error\":%d,\"open_error\":%d}\n", stats.last_send_error, e);
     }
     float tpdf() {
         dither ^= dither << 13; dither ^= dither >> 17; dither ^= dither << 5; float a = (dither & 0xffff) / 65536.0f;
@@ -501,8 +528,8 @@ struct Sender {
                 }
             }
             gain = wanted;
-            if (send(sock, (const char *)packet, (int)(28 + n * 4), 0) < 0) stats.send_errors++;
-            else stats.datagrams++;
+            if (sock == INVALID_SOCKET || send(sock, (const char *)packet, (int)(28 + n * 4), 0) < 0) send_failed(now);
+            else { stats.datagrams++; consecutive_errors = 0; }
             sequence++;
             done += n;
         }
@@ -693,9 +720,10 @@ DWORD WINAPI stats_thread(LPVOID param) {
         Stats x = s->stats;
         log("{\"event\":\"statistics\",\"capture_packets\":%llu,\"frames\":%llu,\"datagrams\":%llu,\"send_errors\":%llu,"
             "\"discontinuities\":%llu,\"silent_packets\":%llu,\"suppressed\":%llu,\"reopen\":%llu,\"clipped\":%llu,"
-            "\"max_gap_ms\":%.3f,\"gain\":%.4f,\"mute\":%s,\"sending\":%s}\n",
+            "\"max_gap_ms\":%.3f,\"gain\":%.4f,\"mute\":%s,\"sending\":%s,\"socket_resets\":%llu,\"last_send_error\":%d}\n",
             x.capture_packets, x.frames, x.datagrams, x.send_errors, x.discontinuities, x.silent_packets, x.suppressed,
-            x.reopen, x.clipped, x.max_gap_ms, g_gain.load(), g_mute.load() ? "true" : "false", s->sending ? "true" : "false");
+            x.reopen, x.clipped, x.max_gap_ms, g_gain.load(), g_mute.load() ? "true" : "false", s->sending ? "true" : "false",
+            x.socket_resets, x.last_send_error);
         s->stats.max_gap_ms = 0;
     }
     return 0;
@@ -710,7 +738,7 @@ bool parse_unsigned(const wchar_t *s, unsigned low, unsigned high, unsigned &out
 }
 
 int usage() {
-    log("usage: vban-sender --target IPv4 [--port 6980] [--stream Windows] [--device ENDPOINT_ID]\n"
+    log("usage: vban-sender --target IPv4 [--source IPv4] [--port 6980] [--stream Windows] [--device ENDPOINT_ID]\n"
         "                   [--prefer ENDPOINT_ID [--match PARENT] [--label DESC ...] ...] [--frames 128] [--idle-ms 2000]\n"
         "                   [--no-endpoint-volume] [--no-keeper] [--no-volume-sync] [--stats-ms 0] [--log FILE] | --config FILE | --list | --stop\n");
     return 2;
@@ -807,6 +835,7 @@ int wmain(int argc, wchar_t **argv) {
         if (i + 1 >= argc) return usage();
         const wchar_t *v = argv[++i];
         if (!wcscmp(a, L"--target")) { if (wcslen(v) >= 64) return usage(); wcscpy_s(g_opt.target, v); }
+        else if (!wcscmp(a, L"--source")) { if (wcslen(v) >= 64) return usage(); wcscpy_s(g_opt.source, v); }
         else if (!wcscmp(a, L"--port")) { if (!parse_unsigned(v, 1, 65535, g_opt.port)) return usage(); }
         else if (!wcscmp(a, L"--frames")) { if (!parse_unsigned(v, 16, kMaxVbanFrames, g_opt.frames)) return usage(); }
         else if (!wcscmp(a, L"--idle-ms")) {
@@ -852,9 +881,14 @@ int wmain(int argc, wchar_t **argv) {
     // Logon task and Run entry may both start the sender; the second one simply yields.
     if (!single || GetLastError() == ERROR_ALREADY_EXISTS) { log("{\"event\":\"already_running\"}\n"); return 0; }
     WSADATA wsa; if (WSAStartup(MAKEWORD(2, 2), &wsa)) return 1;
-    static Sender sender;
-    if (!sender.open(g_opt)) { log("{\"event\":\"error\",\"error\":\"socket\",\"wsa\":%d}\n", WSAGetLastError()); return 2; }
     g_stop = CreateEventW(nullptr, TRUE, FALSE, kStopEventName);
+    static Sender sender;
+    // The network may not be ready yet (sign-in right after resume or boot): keep trying.
+    for (int e = sender.open(g_opt), attempt = 0; e; e = sender.open(g_opt), attempt++) {
+        if (e == WSAEINVAL) { log("{\"event\":\"error\",\"error\":\"address\"}\n"); return 2; }
+        if (attempt % 15 == 0) log("{\"event\":\"network_unavailable\",\"wsa\":%d}\n", e);
+        if (WaitForSingleObject(g_stop, 2000) == WAIT_OBJECT_0) return 0;
+    }
     g_reopen = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     SetConsoleCtrlHandler(on_console, TRUE);
     DeviceEvents *device_events = new DeviceEvents();

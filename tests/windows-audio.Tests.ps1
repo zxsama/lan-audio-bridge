@@ -93,6 +93,9 @@ $ambiguous = Resolve-SenderPreference @([pscustomobject]@{ Id = 'gone'; Parent =
 Assert-True ($ambiguous.Count -eq 0) 'Ambiguous matches are not guessed'
 $tie = Resolve-SenderPreference @([pscustomobject]@{ Id = 'gone'; Parent = 'P1'; Labels = @('Speakers') }) @('a', 'b') @{ a = 'P2'; b = 'P1' } @{ a = 'Speakers'; b = 'Speakers' }
 Assert-True ($tie.Count -eq 1 -and $tie[0].Id -eq 'b') 'Same parent device breaks a description tie'
+$withSource = New-SenderConfigLines '10.0.0.2' 6980 'Windows' @() $null @{} '10.0.0.9'
+Assert-True (($withSource -join '|') -like '*--idle-ms|0|--source|10.0.0.9') 'Source address is written'
+Assert-Fails { New-SenderConfigLines '10.0.0.2' 6980 'Windows' @() $null @{} 'nas.local' } 'Source must be a local IPv4 address'
 $withIdentity = New-SenderConfigLines '10.0.0.2' 6980 'Windows' @('e1') $null @{ e1 = @{ Parent = 'PARENT'; Labels = @('A', 'B', 'A', 'C', 'D') } }
 Assert-True (($withIdentity -join '|') -like '*--prefer|e1|--match|PARENT|--label|A|--label|B|--label|C') 'Identity lines follow their endpoint; labels are unique and capped at 3'
 

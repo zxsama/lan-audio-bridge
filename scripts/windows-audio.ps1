@@ -15,6 +15,7 @@ param(
     [ValidateSet('Ask', 'Yes', 'No')]
     [string]$Drivers = 'Ask',
     [string]$Name,
+    [string]$SourceAddress,
     [string]$SenderPath,
     [string]$PlanPath
 )
@@ -119,10 +120,15 @@ function Start-Sender {
     $watch = [Diagnostics.Stopwatch]::StartNew()
     do {
         Start-Sleep -Milliseconds 200
-        $text = if (Test-Path -LiteralPath $logPath) { (Get-Content -LiteralPath $logPath -Raw -Encoding UTF8) } else { '' }
-        if (-not $text) { $text = '' }
-        if ($text.Length -lt $offset) { $offset = 0 }
-        $line = $text.Substring([Math]::Min($offset, $text.Length)) -split "`n" | Where-Object { $_ -match '"event":"(capture|error)"' } | Select-Object -Last 1
+        # The offset is in bytes (the log holds UTF-8 device names), so decode only the new tail.
+        $bytes = [byte[]]@()
+        if (Test-Path -LiteralPath $logPath) {
+            $stream = [IO.File]::Open($logPath, 'Open', 'Read', 'ReadWrite, Delete')
+            try { $bytes = New-Object byte[] $stream.Length; $null = $stream.Read($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+        }
+        if ($bytes.Length -lt $offset) { $offset = 0 }
+        $text = [Text.Encoding]::UTF8.GetString($bytes, $offset, $bytes.Length - $offset)
+        $line = $text -split "`n" | Where-Object { $_ -match '"event":"(capture|error)"' } | Select-Object -Last 1
     } while (-not $line -and $watch.Elapsed.TotalSeconds -lt 8)
     if (-not $line) { throw 'The sender did not start capturing. See ' + $logPath }
     if ($line -match '"event":"error"') { throw 'The sender reported an error: ' + $line }
@@ -389,14 +395,24 @@ function Invoke-Setup {
         if ($previousEntry) { $labels += @($previousEntry.Entry.Labels) }
         $identity[$id] = @{ Parent = $found.Parents[$id]; Labels = @($labels | Where-Object { $_ } | Select-Object -Unique) }
     }
-    $lines = New-SenderConfigLines $Address $Port $StreamName $Prefer $logPath $identity
+    # Local address the NAS sees as the sender (its VBAN_SOURCE_IP): explicit, else the
+    # current route to the NAS, else the previous configuration.
+    if (-not $SourceAddress) {
+        $route = Find-NetRoute -RemoteIPAddress $Address -ErrorAction SilentlyContinue | Where-Object { $_.PSObject.Properties['IPAddress'] -and $_.IPAddress } | Select-Object -First 1
+        if ($route) { $SourceAddress = [string]$route.IPAddress }
+    }
+    if (-not $SourceAddress -and (Test-Path -LiteralPath $configPath)) {
+        $old = @(Get-Content -LiteralPath $configPath); $i = [array]::IndexOf($old, '--source')
+        if ($i -ge 0) { $SourceAddress = $old[$i + 1] }
+    }
+    $lines = New-SenderConfigLines $Address $Port $StreamName $Prefer $logPath $identity $SourceAddress
     [IO.File]::WriteAllLines($configPath, [string[]]$lines, (New-Object Text.UTF8Encoding $false))
     Set-RunValue $senderRunName ([pscustomobject]@{ Exists = $true; Value = (New-SenderRunCommand $exe $configPath) })
     try { Register-SenderTask } catch { Write-Warning ('Logon task not registered; the Run entry remains the only autostart: ' + $_.Exception.Message) }
     $capture = Start-Sender
     Start-Sleep -Milliseconds 800
     $names = @($Prefer | ForEach-Object { $id = $_; ($endpoints::ListRender() | Where-Object Id -eq $id | Select-Object -First 1).Name })
-    Write-Output ("Sending to {0}:{1} as '{2}', capturing '{3}' with a {4}-frame engine period." -f $Address, $Port, $StreamName, $capture.device, $capture.keeper_frames)
+    Write-Output ("Sending to {0}:{1} as '{2}' from {5}, capturing '{3}' with a {4}-frame engine period." -f $Address, $Port, $StreamName, $capture.device, $capture.keeper_frames, $(if ($SourceAddress) { $SourceAddress } else { 'the default route' }))
     Write-Output ('Windows output for the NAS: ' + ($names -join '  >  backup: '))
 }
 

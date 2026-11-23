@@ -32,11 +32,13 @@ PowerShell 中可传参数，例如 `./scripts/windows-audio.ps1 -Address 192.16
 - **端点被重建**：Windows 更新或驱动重装后，同一设备可能换成新的端点 ID，“NAS 音频”名称也可能丢失。`sender.conf` 为每个首选端点记录父设备（`--match`）和可接受的名称（`--label`：原名称与“NAS 音频”名称）；ID 失效时，发送端按名称（必须匹配）和父设备（用于区分）重新绑定，日志记为 `prefer_rebound`，有歧义时不猜测。重新运行配置时使用同样的规则，并恢复名称。
 - **仅 NAS 输出**：默认输出不是“NAS 音频”时（例如切到耳机），发送端待机，不采集也不发送。
 - **设备变化**：跟随默认播放设备，设备失效时自动重开。首选端点重新出现时切回；默认设备消失后 Windows 改选了非首选设备时，换成下一个首选端点；首选设备仍在时用户手动选择的其他设备会被保留。
+- **睡眠恢复与网络变化**：唤醒后网卡重启，旧的 UDP 套接字会一直发送失败。连续失败 100 次（最多每 2 秒一次）时发送端重建套接字，日志记为 `socket_reset`；启动时网络尚不可用则每 2 秒重试（`network_unavailable`），不会退出。统计中的 `socket_resets`、`last_send_error` 反映这一过程。
+- **源地址**：本机有多块网卡在同一网段时，Windows 可能改用另一块网卡发送，NAS 只接受 `VBAN_SOURCE_IP` 来源。配置时按到 NAS 的路由写入 `--source 本机地址`（可用 `-SourceAddress` 指定），发送端始终从这个地址发出。
 - **优先级**：采集线程注册 MMCSS “Pro Audio”。
 
 ```text
 vban-sender --target IPv4 [--port 6980] [--stream Windows] [--device ENDPOINT_ID]
-            [--prefer ENDPOINT_ID ...] [--frames 128] [--idle-ms 2000|0]
+            [--prefer ENDPOINT_ID ...] [--source LOCAL_IPV4] [--frames 128] [--idle-ms 2000|0]
             [--no-endpoint-volume] [--no-keeper] [--no-volume-sync] [--stats-ms 0] [--log FILE]
 vban-sender --config FILE    # 每行一个参数
 vban-sender --list           # 每个活动播放端点一行 JSON，含 min_frames
@@ -73,6 +75,7 @@ VAIO 的 loopback 位于其内部缓冲之后（实测滞后 61–104 ms），�
 | 现象 | 处理 |
 | --- | --- |
 | 开机后 NAS 没有声音，默认输出变成其他设备 | 先运行 `Setup-Windows-Audio.cmd`（重复运行安全：会找回被重建的端点、恢复名称和默认输出并重启发送端）。只需临时恢复时，在 Windows 声音设置中选择“NAS 音频”，再运行 `Setup-Windows-Audio.cmd Start`。 |
+| 睡眠唤醒后没有声音 | 新版发送端会自动重建连接（日志 `socket_reset`）。旧版需重新运行 `Setup-Windows-Audio.cmd`。若统计中 `send_errors` 持续增长而 `datagrams` 不变，检查到 NAS 的网络和 `--source` 地址是否仍属于本机。 |
 | 发送端没有运行 | `Setup-Windows-Audio.cmd Start`；或在任务计划程序中运行 `\LanAudioBridge\Sender`。 |
 | 日志出现 `standby` | 默认输出不是 NAS 输出。选择“NAS 音频”即可恢复发送。 |
 | “NAS 音频”名称变回设备原名 | 端点被 Windows 重建过；发送端仍会按身份找到它。重新运行配置可恢复名称（需要一次管理员确认）。 |

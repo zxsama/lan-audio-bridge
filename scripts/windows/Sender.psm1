@@ -129,7 +129,7 @@ function Assert-SenderEndpointId {
 
 function New-SenderConfigLines {
     param([string]$Address, [int]$Port = 6980, [string]$StreamName = 'Windows',
-          [AllowEmptyCollection()][string[]]$Prefer = @(), [string]$LogPath, [hashtable]$Identity = @{})
+          [AllowEmptyCollection()][string[]]$Prefer = @(), [string]$LogPath, [hashtable]$Identity = @{}, [string]$Source)
     $ip = $null
     if (-not [Net.IPAddress]::TryParse($Address, [ref]$ip) -or $ip.AddressFamily -ne 'InterNetwork' -or $Address -ne $ip.ToString()) {
         throw 'Address must be the NAS IPv4 address, for example 192.168.1.20.'
@@ -140,6 +140,12 @@ function New-SenderConfigLines {
     if ($Prefer.Count -gt 8) { throw 'At most 8 preferred endpoints are supported.' }
     # --idle-ms 0: keep sending silence so the NAS output stays connected and awake.
     $lines = @('--target', $Address, '--port', [string]$Port, '--stream', $StreamName, '--stats-ms', '60000', '--idle-ms', '0')
+    if ($Source) {
+        $src = $null
+        if (-not [Net.IPAddress]::TryParse($Source, [ref]$src) -or $src.AddressFamily -ne 'InterNetwork' -or $Source -ne $src.ToString()) { throw 'Source must be a local IPv4 address.' }
+        # Send from the address the NAS accepts (VBAN_SOURCE_IP), whichever adapter Windows prefers.
+        $lines += @('--source', $Source)
+    }
     foreach ($id in $Prefer) {
         Assert-SenderEndpointId $id
         $lines += @('--prefer', $id)
